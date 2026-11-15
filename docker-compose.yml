@@ -1,0 +1,139 @@
+name: tester-receiver
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.22.1-pg16
+    environment:
+      POSTGRES_USER: tester
+      POSTGRES_PASSWORD: tester
+      POSTGRES_DB: tester
+    ports:
+      - "5440:5432"
+    volumes:
+      # 逐檔掛載：整個目錄掛上去會蓋掉映像檔內建的 timescaledb 初始化腳本
+      - ./migrations/001_schema.sql:/docker-entrypoint-initdb.d/100_schema.sql:ro
+      - ./migrations/002_seed.sql:/docker-entrypoint-initdb.d/101_seed.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tester -d tester"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    # RabbitMQ 的資料目錄以節點名稱（含 hostname）命名；固定 hostname 重啟後才找得到原本的 queue
+    hostname: rabbitmq
+    environment:
+      # 內建的 guest 帳號只能從 localhost 連線，其他容器連不上，所以另建帳號
+      RABBITMQ_DEFAULT_USER: tester
+      RABBITMQ_DEFAULT_PASS: tester
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    volumes:
+      - mqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      args:
+        CMD: api
+    environment:
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: postgres://tester:tester@postgres:5432/tester
+      AMQP_URL: amqp://tester:tester@rabbitmq:5672/
+    ports:
+      - "8090:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  receiver:
+    build:
+      context: .
+      args:
+        CMD: receiver
+    environment:
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: postgres://tester:tester@postgres:5432/tester
+      AMQP_URL: amqp://tester:tester@rabbitmq:5672/
+      PREFETCH: "50"
+      WORKERS: "4"
+      WEBHOOK_URL: http://webhook-sink:8080/alerts
+      RABBITMQ_MGMT_URL: http://tester:tester@rabbitmq:15672
+      # 以下可由 shell 環境變數覆寫，測試 watchdog 時用（見 README）
+      WEBHOOK_MIN_INTERVAL: ${WEBHOOK_MIN_INTERVAL:-1m}
+      WATCHDOG_INTERVAL: ${WATCHDOG_INTERVAL:-1m}
+      WATCHDOG_STALE_AFTER: ${WATCHDOG_STALE_AFTER:-2m}
+      FAULT_STALL: ${FAULT_STALL:-false}
+    # 預設 10 秒後 SIGKILL。處理中的訊息最多需要一次資料庫逾時（5 秒）才能收尾，多留一些餘裕
+    stop_grace_period: 20s
+    ports:
+      - "8091:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # 開發用的 webhook 接收端：把告警印到 log（docker compose logs webhook-sink）
+  webhook-sink:
+    build:
+      context: .
+      args:
+        CMD: webhooksink
+
+  # ---- 測試工具：平常不啟動，用 `docker compose --profile tools run --rm <名稱>` 執行 ----
+
+  simulator:
+    profiles: [tools]
+    build:
+      context: .
+      args:
+        CMD: simulator
+    environment:
+      API_URL: http://api:8080
+    volumes:
+      - ./out:/out
+
+  verify:
+    profiles: [tools]
+    build:
+      context: .
+      args:
+        CMD: verify
+    environment:
+      DATABASE_URL: postgres://tester:tester@postgres:5432/tester
+      RABBITMQ_MGMT_URL: http://tester:tester@rabbitmq:15672
+      API_METRICS_URL: http://api:8080/metrics
+      RECEIVER_METRICS_URL: http://receiver:8080/metrics
+    volumes:
+      - ./out:/out
+
+  chaos:
+    profiles: [tools]
+    build:
+      context: .
+      args:
+        CMD: chaos
+    environment:
+      API_URL: http://api:8080
+      RECEIVER_URL: http://receiver:8080
+      DATABASE_URL: postgres://tester:tester@postgres:5432/tester
+      RABBITMQ_MGMT_URL: http://tester:tester@rabbitmq:15672
+    volumes:
+      # chaos 要停啟其他容器，所以需要 Docker socket。這等同給它主機的 Docker 控制權，只用於本機測試
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./out:/out
+
+volumes:
+  pgdata:
+  mqdata:
