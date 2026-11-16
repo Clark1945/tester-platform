@@ -62,7 +62,7 @@ func run(logger *slog.Logger) error {
 		dlq.Run(dlqCtx)
 	}()
 
-	counters := &metrics.ReceiverCounters{}
+	counters := metrics.NewReceiverCounters()
 	alerts := notify.New(cfg.WebhookURL, "receiver", cfg.WebhookMinInterval, logger)
 
 	proc := &processor{
@@ -178,7 +178,8 @@ func stall(ctx context.Context, d amqp.Delivery) {
 // routes：/healthz 要求資料庫與 broker 都可用才算健康；/metrics 輸出計數器。
 func routes(db pinger, broker connectionReporter, counters *metrics.ReceiverCounters) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", metrics.Handler(counters.Snapshot))
+	mux.Handle("GET /metrics", counters.PrometheusHandler())           // 給 Prometheus 抓取
+	mux.Handle("GET /metrics.json", metrics.Handler(counters.Snapshot)) // 給 verify / chaos 對帳
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()

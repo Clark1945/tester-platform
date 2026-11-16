@@ -61,7 +61,7 @@ type fixture struct {
 }
 
 func newFixture() *fixture {
-	f := &fixture{store: &fakeStore{}, pub: &fakePublisher{}, metrics: &metrics.APICounters{}}
+	f := &fixture{store: &fakeStore{}, pub: &fakePublisher{}, metrics: metrics.NewAPICounters()}
 	h := &handler{
 		store:     f.store,
 		devices:   fakeDevices{"device-001": true},
@@ -239,9 +239,23 @@ func TestMetrics_CountEachOutcome(t *testing.T) {
 		t.Errorf("accepted=%d rejected_4xx=%d publish_failed=%d, want 2 / 2 / 1", a, r, p)
 	}
 
-	rec := f.do(t, http.MethodGet, "/metrics", "")
+	rec := f.do(t, http.MethodGet, "/metrics.json", "")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"accepted":2`) {
-		t.Errorf("GET /metrics: status = %d body = %s", rec.Code, rec.Body)
+		t.Errorf("GET /metrics.json: status = %d body = %s", rec.Code, rec.Body)
+	}
+
+	// Prometheus 格式讀的是同一組數值，另外多了延遲分布
+	prom := f.do(t, http.MethodGet, "/metrics", "").Body.String()
+	for _, want := range []string{
+		`tester_api_readings_total{outcome="accepted"} 2`,
+		`tester_api_readings_total{outcome="rejected"} 2`,
+		`tester_api_readings_total{outcome="publish_failed"} 1`,
+		`tester_api_request_duration_seconds_count{outcome="accepted"} 2`,
+		`go_goroutines`,
+	} {
+		if !strings.Contains(prom, want) {
+			t.Errorf("GET /metrics lacks %q", want)
+		}
 	}
 }
 

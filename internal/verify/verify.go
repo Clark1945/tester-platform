@@ -260,7 +260,7 @@ func (r *runner) checkCounters(ctx context.Context) {
 	}
 }
 
-// fetchMetrics 讀取 /metrics，只保留數值欄位。
+// fetchMetrics 讀取 /metrics.json，只保留數值欄位。
 func fetchMetrics(ctx context.Context, url string) (map[string]int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

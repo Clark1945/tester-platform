@@ -91,6 +91,41 @@ services:
       args:
         CMD: webhooksink
 
+  # ---- 監控 ----
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      # 本機開發用：免登入即可檢視儀表板；要編輯請用 admin / tester 登入
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: tester
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/tester-receiver.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "3001:3000"   # 3000 已被本機其他專案的 Grafana 使用
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      - prometheus
+
   # ---- 測試工具：平常不啟動，用 `docker compose --profile tools run --rm <名稱>` 執行 ----
 
   simulator:
@@ -113,8 +148,8 @@ services:
     environment:
       DATABASE_URL: postgres://tester:tester@postgres:5432/tester
       RABBITMQ_MGMT_URL: http://tester:tester@rabbitmq:15672
-      API_METRICS_URL: http://api:8080/metrics
-      RECEIVER_METRICS_URL: http://receiver:8080/metrics
+      API_METRICS_URL: http://api:8080/metrics.json
+      RECEIVER_METRICS_URL: http://receiver:8080/metrics.json
     volumes:
       - ./out:/out
 
@@ -137,3 +172,5 @@ services:
 volumes:
   pgdata:
   mqdata:
+  promdata:
+  grafanadata:

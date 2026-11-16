@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: tester-receiver
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false    # 儀表板以版控中的 JSON 為準；要改就改檔案
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards

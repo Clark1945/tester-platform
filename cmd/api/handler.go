@@ -55,17 +55,19 @@ func (h *handler) routes() http.Handler {
 	mux.HandleFunc("POST /v1/readings", h.postReading)
 	mux.HandleFunc("GET /v1/readings", h.getReadings)
 	mux.HandleFunc("GET /healthz", h.healthz)
-	mux.Handle("GET /metrics", metrics.Handler(h.metrics.Snapshot))
+	mux.Handle("GET /metrics", h.metrics.PrometheusHandler())           // 給 Prometheus 抓取
+	mux.Handle("GET /metrics.json", metrics.Handler(h.metrics.Snapshot)) // 給 verify / chaos 對帳
 	return mux
 }
 
 func (h *handler) postReading(w http.ResponseWriter, r *http.Request) {
+	start := time.Now() // 用來量測整個請求的處理時間（含等待 confirm）
 	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
 	defer cancel()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	if err != nil {
-		h.metrics.Rejected4xx.Add(1)
+		h.metrics.Observe(metrics.APIRejected, time.Since(start))
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			h.writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
@@ -78,7 +80,7 @@ func (h *handler) postReading(w http.ResponseWriter, r *http.Request) {
 	reading, err := model.ParseReading(body)
 	if err != nil {
 		// ParseReading 的錯誤都是 ErrInvalid，訊息可以安全地回給 client
-		h.metrics.Rejected4xx.Add(1)
+		h.metrics.Observe(metrics.APIRejected, time.Since(start))
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -87,7 +89,7 @@ func (h *handler) postReading(w http.ResponseWriter, r *http.Request) {
 
 	// 只查記憶體快取，不碰資料庫：資料庫故障時 api 仍能收資料
 	if !h.devices.Exists(reading.DeviceID) {
-		h.metrics.Rejected4xx.Add(1)
+		h.metrics.Observe(metrics.APIRejected, time.Since(start))
 		h.writeError(w, http.StatusNotFound, "unknown device_id")
 		return
 	}
@@ -105,14 +107,14 @@ func (h *handler) postReading(w http.ResponseWriter, r *http.Request) {
 	if err := h.publisher.Publish(ctx, mq.Message{ID: reading.UniID.String(), Body: msg}); err != nil {
 		// 回 503 讓 device 以相同的 uni_id / seq / record_time 重試。
 		// 重複的 uni_id 不在這裡判斷，由資料庫的 unique constraint 去重。
-		h.metrics.PublishFailed.Add(1)
+		h.metrics.Observe(metrics.APIPublishFailed, time.Since(start))
 		log.Warn("publish not confirmed", "error", err)
 		h.writeError(w, http.StatusServiceUnavailable, "service unavailable")
 		return
 	}
 
 	// 只有 broker 確認後才計入 accepted：這個數字就是恆等式左邊的 published(confirmed)
-	h.metrics.Accepted.Add(1)
+	h.metrics.Observe(metrics.APIAccepted, time.Since(start))
 	h.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 

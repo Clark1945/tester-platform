@@ -1,0 +1,182 @@
+{
+  "uid": "tester-receiver",
+  "title": "Tester Receiver",
+  "tags": ["tester-receiver"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "API",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "up{job=\"api\"}" }],
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": {
+        "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN" }, "1": { "text": "UP" } } }],
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+      } }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Receiver",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "up{job=\"receiver\"}" }],
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": {
+        "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN" }, "1": { "text": "UP" } } }],
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+      } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Queue：等待中 (ready)",
+      "description": "已進入 broker、還沒被 receiver 取走的訊息數",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"readings\"}" }],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": {
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1000 }, { "color": "red", "value": 10000 }] }
+      } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "Queue：處理中 (unacked)",
+      "description": "已交給 receiver、還沒 ack 的訊息數。上限是 prefetch（預設 50）",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "rabbitmq_detailed_queue_messages_unacked{queue=\"readings\"}" }],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": {
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+      } }
+    },
+    {
+      "id": 5, "type": "stat", "title": "DLQ",
+      "description": "dead letter queue 的訊息數。不是 0 就代表有資料沒進資料庫",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"readings.dlq\"}" }],
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": {
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+      } }
+    },
+    {
+      "id": 6, "type": "stat", "title": "距離上次寫入",
+      "description": "receiver 最後一次成功寫入資料庫是多久以前。queue 有東西而這個數字一直變大，代表 consumer 卡住了",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "(time() - tester_receiver_last_written_timestamp_seconds) and (tester_receiver_last_written_timestamp_seconds > 0)" }],
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": {
+        "unit": "s", "decimals": 0, "noValue": "尚未寫入",
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 120 }] }
+      } }
+    },
+
+    {
+      "id": 10, "type": "timeseries", "title": "API：每秒請求數（依結局）",
+      "description": "accepted = broker 已確認、回 202；rejected = 4xx；publish_failed = 未獲確認、回 503",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum by (outcome) (rate(tester_api_readings_total[30s]))", "legendFormat": "{{outcome}}" }],
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "accepted" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "rejected" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+          { "matcher": { "id": "byName", "options": "publish_failed" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ] }
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Receiver：每秒處理數（依結局）",
+      "description": "written = 新寫入；duplicate = 資料庫已有（重送）；dlq = 進 dead letter queue；requeued = 還給 queue",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum by (outcome) (rate(tester_receiver_messages_total[30s]))", "legendFormat": "{{outcome}}" }],
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "written" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "duplicate" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byName", "options": "dlq" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "requeued" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] }
+        ] }
+    },
+
+    {
+      "id": 20, "type": "timeseries", "title": "Queue 深度",
+      "description": "receiver 或資料庫停機時 ready 會上升，恢復後下降。這就是 MQ 的緩衝作用",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"readings\"}", "legendFormat": "readings ready" },
+        { "refId": "B", "expr": "rabbitmq_detailed_queue_messages_unacked{queue=\"readings\"}", "legendFormat": "readings unacked" },
+        { "refId": "C", "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"readings.dlq\"}", "legendFormat": "dlq" }
+      ],
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "dlq" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ] }
+    },
+    {
+      "id": 21, "type": "timeseries", "title": "Receiver：每秒重試次數",
+      "description": "寫入失敗後退避重試的次數。資料庫停機時會出現；因為有指數退避，數值應該很低而不是暴衝",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(rate(tester_receiver_retries_total[30s]))", "legendFormat": "retries" }],
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0, "color": { "mode": "fixed", "fixedColor": "orange" }, "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } }, "overrides": [] }
+    },
+
+    {
+      "id": 30, "type": "timeseries", "title": "API：請求延遲（accepted）",
+      "description": "從收到請求到回 202 的時間，包含等待 broker 的 publisher confirm",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(tester_api_request_duration_seconds_bucket{outcome=\"accepted\"}[30s])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(tester_api_request_duration_seconds_bucket{outcome=\"accepted\"}[30s])))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(tester_api_request_duration_seconds_bucket{outcome=\"accepted\"}[30s])))", "legendFormat": "p99" }
+      ],
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0, "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" } }, "overrides": [] }
+    },
+    {
+      "id": 31, "type": "timeseries", "title": "Receiver：處理時間（written）",
+      "description": "從收到訊息到 ack 的時間，包含重試與退避。資料庫停機期間處理中的訊息，恢復後會在這裡出現長尾",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(tester_receiver_process_duration_seconds_bucket{outcome=\"written\"}[30s])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(tester_receiver_process_duration_seconds_bucket{outcome=\"written\"}[30s])))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(tester_receiver_process_duration_seconds_bucket{outcome=\"written\"}[30s])))", "legendFormat": "p99" }
+      ],
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0, "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" } }, "overrides": [] }
+    },
+
+    {
+      "id": 40, "type": "timeseries", "title": "Goroutine 數",
+      "description": "持續上升而不回落代表 goroutine 洩漏",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "go_goroutines{job=~\"api|receiver\"}", "legendFormat": "{{job}}" }],
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" } }, "overrides": [] }
+    },
+    {
+      "id": 41, "type": "timeseries", "title": "記憶體（RSS）",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "process_resident_memory_bytes{job=~\"api|receiver\"}", "legendFormat": "{{job}}" }],
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0, "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" } }, "overrides": [] }
+    }
+  ]
+}

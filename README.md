@@ -2,6 +2,8 @@
 
 用 Go 實作的測試機台資料接收服務。主題是**可靠性**：資料不丟、重送不重複，而且「有沒有掉資料」可以被驗證。完整規格見 [SPEC.md](SPEC.md)。
 
+各階段的開發過程、流程、驗證方法與尚未確認的事項見 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+
 ## 架構
 
 ```
@@ -96,7 +98,27 @@ RESULT: PASSED
 
 ## 執行方式
 
-對外 port：API `8090`、receiver（`/healthz`、`/metrics`）`8091`、Postgres `5440`、RabbitMQ `5673`、RabbitMQ 管理介面 `15673`（帳密 `tester` / `tester`）。
+對外 port：
+
+| 服務 | 位址 | 備註 |
+|---|---|---|
+| API | `localhost:8090` | `/v1/readings`、`/healthz`、`/metrics`、`/metrics.json` |
+| receiver | `localhost:8091` | `/healthz`、`/metrics`、`/metrics.json` |
+| Grafana | http://localhost:3001 | 免登入可檢視；編輯用 `admin` / `tester` |
+| Prometheus | http://localhost:9090 | Alerts 頁面可看告警規則的狀態 |
+| RabbitMQ 管理介面 | http://localhost:15673 | `tester` / `tester` |
+| Postgres | `localhost:5440` | `tester` / `tester`，資料庫 `tester` |
+| RabbitMQ | `localhost:5673` | |
+
+### 監控（Prometheus + Grafana）
+
+`docker compose up -d` 會一併啟動。打開 http://localhost:3001 就是儀表板，不用另外設定：資料來源與儀表板都由 `monitoring/` 下的檔案自動載入。
+
+儀表板上有：服務是否存活、queue 深度（等待中 / 處理中 / DLQ）、距離上次寫入多久、API 與 receiver 每秒處理量（依結局分色）、重試次數、延遲的 p50 / p95 / p99、goroutine 數與記憶體。
+
+要看到有意義的圖，跑一次 chaos test 再回來看：receiver 停機時 queue 上升、資料庫停機時出現重試、broker 重啟時出現 `publish_failed`，恢復後 queue 回到 0。
+
+`/metrics` 是 Prometheus 格式；`/metrics.json` 是同一組數值的 JSON，給 verify 與 chaos 對帳用。
 
 ### Chaos test
 
@@ -185,7 +207,8 @@ cmd/verify/         對帳工具，失敗時 exit code 非 0
 cmd/chaos/          一鍵 chaos test：流量 + 故障注入 + 對帳
 internal/simulator/ simulator 的邏輯（chaos 也會用到）
 internal/verify/    對帳的邏輯（chaos 也會用到）
-internal/metrics/   計數器與 /metrics
+internal/metrics/   計數器、延遲分布，以 Prometheus 與 JSON 兩種格式輸出
+monitoring/         Prometheus 設定與告警規則、Grafana 的資料來源與儀表板
 internal/notify/    webhook 告警與節流
 internal/config/    環境變數載入
 internal/model/     Reading 結構與解析、驗證（api 與 receiver 共用）
@@ -410,7 +433,7 @@ published(confirmed) = written + duplicate + dlq + queue(ready + unacked)
 
 **6. 可觀測性**
 
-記憶體計數器換成 Prometheus 指標（規格把它列為非目標），加上延遲的分布與 queue 深度的趨勢。目前的 `/metrics` 只能回答「現在是多少」，看不到趨勢。
+Prometheus 與 Grafana 已經加入（見下方「為什麼加入 Prometheus 與 Grafana」）。規模變大後還需要補的是：接上 Alertmanager 讓告警能主動通知並分級、加上 PostgreSQL 的指標（連線數、寫入延遲、chunk 大小）、以及跨服務的追蹤（trace），才能回答「這一筆資料從 API 到寫入資料庫，時間花在哪一段」。
 
 **不會改的部分**：at-least-once + 冪等寫入、等 confirm 才回 202、寫入後才 ack、錯誤分類與 DLQ、序號對帳。這些是正確性的設計，與規模無關。
 
@@ -441,8 +464,36 @@ Device 產生每筆資料時，先寫進本機的 `unsend_log` 檔案，再嘗�
 
 代價是資料最長會延遲一天才完整，而且需要管理檔案的保留與重複上傳。
 
+### 為什麼加入 Prometheus 與 Grafana
+
+原本的 `/metrics` 只有累計的計數器，能回答「到現在為止寫入了幾筆」，但回答不了三件事：
+
+- **趨勢**：queue 是在變長還是變短？計數器只有當下的值，沒有歷史。
+- **延遲的分布**：平均值會把問題蓋掉。99% 的請求 5 毫秒、1% 的請求 5 秒，平均起來看不出異常。所以用 histogram 記錄，查詢時取 p50 / p95 / p99。
+- **receiver 整個掛掉**：watchdog 跑在 receiver 行程裡，receiver 死了它也跟著消失。Prometheus 在外面抓指標，抓不到就是 `up == 0`。實測停掉 receiver 後 40 秒 `ReceiverDown` 告警觸發，重啟後解除。
+
+**計數器不會有兩份帳。** Prometheus 的計數器是用 `CounterFunc` 包裝原本的 atomic 值，抓取時才去讀。所以 Prometheus、`/metrics.json`、watchdog 看到的是同一個數字。
+
+**重啟歸零的問題在這裡不存在。** 計數器重啟會歸零，這讓恆等式在 chaos 下不成立。但 Prometheus 的 `rate()` 會偵測到數值變小並當成重置處理，所以「每秒幾筆」的圖不受重啟影響。這是把計數器交給時序資料庫的主要好處：行程不必自己記住歷史。
+
+**Queue 深度不經過應用程式。** RabbitMQ 內建 Prometheus 外掛，直接抓它的 `/metrics/detailed`。receiver 掛掉時 queue 深度仍然看得到。
+
+**告警規則與 watchdog 的分工：**
+
+| | watchdog | Prometheus 告警規則 |
+|---|---|---|
+| 位置 | receiver 行程內 | 外部 |
+| receiver 掛掉時 | 跟著消失 | 仍在運作（`ReceiverDown`） |
+| 主動通知 | 有（webhook） | 沒有——未接 Alertmanager，只能在 Prometheus 的 Alerts 頁面看到 |
+| 需要額外的服務 | 不需要 | 需要 Prometheus |
+
+兩者目前是互補的。接上 Alertmanager 之後，watchdog 的三項檢查都可以由告警規則取代。
+
 ### 已知限制
 
+- Prometheus 的告警規則沒有接 Alertmanager，不會主動通知。
+- `increase()` 算出的筆數是估計值（它會外插到查詢視窗的邊界），chaos 期間實測比實際多約 2%。**對帳要用 verify，不能用 Prometheus 的數字。**
+- 沒有 PostgreSQL 的指標。
 - watchdog 跑在 receiver 行程內。receiver 整個掛掉時它也跟著消失，那種情況要靠外部監控（容器重啟策略、對 `/healthz` 的探測）。
 - 資料庫長時間停機時，worker 會一直持有未 ack 的訊息。RabbitMQ 預設在訊息未 ack 超過 30 分鐘時關閉該 channel（`consumer_timeout`），屆時 consumer 會自動重連、訊息重新投遞，不會遺失，但會多一次重送。
 - DLQ 的訊息目前要透過 RabbitMQ 管理介面手動檢視與重放，沒有重放工具。
@@ -459,4 +510,6 @@ Device 產生每筆資料時，先寫進本機的 `unsend_log` 檔案，再嘗�
 | Device 快取 | 階段 5 選配 | 提前到階段 2 | 否則資料庫故障時 API 無法收資料 |
 | `make chaos` | Makefile 一鍵執行 | chaos 流程寫成 Go 程式並以容器執行，Makefile 只是包裝 | Windows 沒有 make；容器化後不需要在主機安裝 Go |
 | 計數器 | 規格列的 5 個 | receiver 多一個 `requeued` | 讓 `received = written + duplicate + dlq + requeued` 對得起來 |
-| Go 版本 | 1.22+ | 1.25 | `go mod tidy` 依相依套件（pgx v5.13 等）的需求自動設定 |
+| Go 版本 | 1.22+ | 1.26 | `go mod tidy` 依相依套件（Prometheus client 等）的需求自動設定 |
+| Prometheus 與監控堆疊 | 列為非目標 | 已加入 Prometheus 與 Grafana | 後續追加的需求；記憶體計數器只能看「現在是多少」，看不到趨勢與延遲分布 |
+| `/metrics` 的格式 | expvar 或純文字 | `/metrics` 為 Prometheus 格式，`/metrics.json` 為 JSON | Prometheus 預設抓 `/metrics`；對帳工具讀 JSON 比較簡單 |

@@ -205,8 +205,8 @@ func run() (bool, error) {
 		Queues:             mgmt,
 		Queue:              o.queue,
 		DLQ:                o.queue + ".dlq",
-		APIMetricsURL:      o.apiURL + "/metrics",
-		ReceiverMetricsURL: o.receiverURL + "/metrics",
+		APIMetricsURL:      o.apiURL + "/metrics.json",
+		ReceiverMetricsURL: o.receiverURL + "/metrics.json",
 		StrictCounters:     false, // receiver 被重啟過，計數器已歸零，恆等式僅供參考
 		DrainTimeout:       o.drainTimeout,
 		Out:                os.Stdout,

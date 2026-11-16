@@ -1,0 +1,66 @@
+# 告警規則。這裡只定義「什麼情況算異常」，在 Prometheus 的 Alerts 頁面可以看到狀態。
+# 沒有接 Alertmanager，所以不會主動通知；主動通知仍由 receiver 內建的 watchdog（webhook）負責。
+#
+# 與 watchdog 的分工：watchdog 跑在 receiver 行程裡，receiver 整個掛掉時它也跟著消失。
+# Prometheus 在外面觀察，所以 ReceiverDown / ApiDown 是 watchdog 做不到的。
+
+groups:
+  - name: tester-receiver
+    rules:
+      - alert: ReceiverDown
+        expr: up{job="receiver"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "receiver 抓不到指標（行程掛了或無法連線）"
+          description: "queue 會持續累積，資料不會進資料庫。"
+
+      - alert: ApiDown
+        expr: up{job="api"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "api 抓不到指標"
+          description: "device 送不進資料，只能靠 device 端重試。"
+
+      - alert: DeadLetterQueueNotEmpty
+        expr: rabbitmq_detailed_queue_messages_ready{queue="readings.dlq"} > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DLQ 有 {{ $value }} 筆訊息"
+          description: "有資料沒進資料庫，需要人工檢視失敗原因並重放。"
+
+      # queue 裡有東西在等，但過去 2 分鐘沒有任何一筆被處理完
+      - alert: ConsumerStuck
+        expr: |
+          rabbitmq_detailed_queue_messages_ready{queue="readings"} > 0
+          and on()
+          sum(rate(tester_receiver_messages_total{outcome=~"written|duplicate|dlq"}[2m])) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "receiver 活著但沒在消化訊息"
+          description: "queue 有 {{ $value }} 筆在等待，過去 2 分鐘沒有訊息被處理完。"
+
+      - alert: PublishFailures
+        expr: sum(rate(tester_api_readings_total{outcome="publish_failed"}[1m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "api 有請求未獲 broker 確認（回 503）"
+          description: "每秒 {{ $value | printf \"%.1f\" }} 筆。broker 可能斷線或過載。"
+
+      - alert: ReceiverRetrying
+        expr: sum(rate(tester_receiver_retries_total[1m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "receiver 持續在重試寫入"
+          description: "每秒 {{ $value | printf \"%.1f\" }} 次。資料庫可能不可用或過慢。"

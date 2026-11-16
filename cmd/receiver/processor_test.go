@@ -104,7 +104,7 @@ func newHarness() *harness {
 		store:       h.store,
 		dlq:         h.dlq,
 		alerts:      h.alerts,
-		metrics:     &metrics.ReceiverCounters{},
+		metrics:     metrics.NewReceiverCounters(),
 		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		queue:       "readings",
 		timeout:     time.Second,

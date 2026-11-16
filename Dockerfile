@@ -1,5 +1,5 @@
 # 多階段建置：同一個 Dockerfile 用 --build-arg CMD=api|receiver|... 產生各服務的映像檔
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

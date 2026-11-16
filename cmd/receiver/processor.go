@@ -61,6 +61,7 @@ type processor struct {
 type job struct {
 	d       amqp.Delivery
 	log     *slog.Logger
+	start   time.Time // 收到訊息的時間，用來量測處理時間（含重試與退避）
 	settled bool
 }
 
@@ -89,7 +90,7 @@ func (j *job) settle(action string, err error) {
 // 另外只有在「服務正在關閉」或「DLQ 發不出去」時會把訊息放回 queue。
 // 沒有任何一條路徑是只寫 log 就丟掉訊息的。
 func (p *processor) handle(ctx context.Context, d amqp.Delivery) {
-	j := &job{d: d, log: p.log.With("redelivered", d.Redelivered)}
+	j := &job{d: d, log: p.log.With("redelivered", d.Redelivered), start: time.Now()}
 	p.metrics.Received.Add(1)
 
 	// 一筆訊息 panic 不能讓整個 receiver 掛掉（那會讓 prefetch 的 50 筆全部重送，
@@ -118,9 +119,9 @@ func (p *processor) handle(ctx context.Context, d amqp.Delivery) {
 		inserted, err := p.write(ctx, reading)
 		if err == nil {
 			if inserted {
-				p.metrics.MarkWritten(time.Now())
+				p.metrics.Settle(metrics.ReceiverWritten, time.Since(j.start))
 			} else {
-				p.metrics.Duplicate.Add(1)
+				p.metrics.Settle(metrics.ReceiverDuplicate, time.Since(j.start))
 				j.log.Info("duplicate reading ignored")
 			}
 			j.ack()
@@ -165,7 +166,7 @@ func (p *processor) handle(ctx context.Context, d amqp.Delivery) {
 		// 退避等待可被關閉訊號中斷：關閉時把訊息還給 queue，下次啟動再處理
 		if retry.Sleep(ctx, delay) != nil {
 			j.log.Info("shutting down during retry; message returned to queue")
-			p.metrics.Requeued.Add(1)
+			p.metrics.Settle(metrics.ReceiverRequeued, time.Since(j.start))
 			j.requeue()
 			return
 		}
@@ -232,13 +233,13 @@ func (p *processor) deadLetter(ctx context.Context, j *job, reason string, cause
 	if err != nil {
 		log.Error("dead-letter publish failed; returning message to queue", "error", err, "cause", cause)
 		_ = retry.Sleep(ctx, p.backoff.Max) // 避免 hot loop；關閉時會提前返回
-		p.metrics.Requeued.Add(1)
+		p.metrics.Settle(metrics.ReceiverRequeued, time.Since(j.start))
 		j.requeue()
 		return
 	}
 
 	log.Error("message dead-lettered", "error", cause, "body", truncate(string(j.d.Body), 256))
-	p.metrics.DLQ.Add(1)
+	p.metrics.Settle(metrics.ReceiverDLQ, time.Since(j.start))
 	j.ack()
 
 	p.alerts.Notify(ctx, notify.Alert{

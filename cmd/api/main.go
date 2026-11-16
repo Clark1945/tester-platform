@@ -74,7 +74,7 @@ func run(logger *slog.Logger) error {
 		store:     st,
 		devices:   cache,
 		publisher: pub,
-		metrics:   &metrics.APICounters{},
+		metrics:   metrics.NewAPICounters(),
 		log:       logger,
 		timeout:   cfg.RequestTimeout,
 	}
