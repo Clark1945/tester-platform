@@ -103,16 +103,18 @@ func (w *watchdog) check(ctx context.Context) {
 	}
 	w.prev = &watchSample{ready: main.Ready, settled: settled}
 
-	// 3. 太久沒有寫入，而 queue 裡明明有東西。
-	//    從未寫入過時，以啟動時間為基準（否則剛啟動就會誤報）。
-	last := w.counters.LastWrittenAt()
+	// 3. 太久沒有任何訊息被處理完，而 queue 裡明明有東西。
+	//    「處理完」包含新寫入、重複、進 DLQ：只看新寫入的話，一批全是重複的重新投遞
+	//    會被誤判成 receiver 沒在工作。
+	//    從未處理過時，以啟動時間為基準（否則剛啟動就會誤報）。
+	last := w.counters.LastSettledAt()
 	if last.IsZero() {
 		last = w.startedAt
 	}
 	if idle := w.now().Sub(last); idle > w.staleAfter && main.Total() > 0 {
 		w.alerts.Notify(ctx, notify.Alert{
 			Kind:    alertKindNoWrites,
-			Message: "no successful write for too long while the queue is not empty",
+			Message: "no message has been settled for too long while the queue is not empty",
 			Fields: map[string]any{
 				"queue":     w.queue,
 				"idle":      idle.Round(time.Second).String(),

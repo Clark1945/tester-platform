@@ -3,10 +3,12 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"tester-receiver/internal/model"
@@ -77,19 +79,53 @@ func (s *Store) ListDeviceIDs(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+// ErrUnknownDevice：寫入時資料庫以 foreign key 拒絕，代表 device 不在 devices 表中。
+var ErrUnknownDevice = errors.New("unknown device")
+
+// ErrKeyConflict：(uni_id, record_time) 已存在，但內容和這次要寫的不一樣。
+// 這不是重送（重送的內容會完全相同），而是兩筆不同的資料用了同一個鍵——
+// 通常是 device 端產生 uni_id 的方式有問題。不能當成重複默默略過，否則第二筆就無聲無息地消失了。
+var ErrKeyConflict = errors.New("idempotency key reused with different content")
+
+const sqlStateForeignKeyViolation = "23503"
+
 // InsertReading 冪等寫入一筆資料。
-// inserted 為 true 代表新寫入；false 代表 (uni_id, record_time) 已存在（重送）。
+//
+//   - inserted = true：新寫入。
+//   - inserted = false, err = nil：已存在且內容相同，是重送。
+//   - ErrKeyConflict：已存在但內容不同。
+//   - ErrUnknownDevice：device 不存在。device 的檢查由 foreign key 完成，不另外 SELECT——
+//     檢查與寫入是同一個動作，沒有「查的時候還在、寫的時候被刪了」的空窗，也少一次資料庫往返。
 func (s *Store) InsertReading(ctx context.Context, r model.Reading) (inserted bool, err error) {
-	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO readings (uni_id, device_id, seq, record_time, freq)
-		 VALUES ($1, $2, $3, $4, $5)
-		 ON CONFLICT (uni_id, record_time) DO NOTHING`,
+	// 一個敘述完成「寫入」與「若已存在，比對內容」。
+	// 第二個子查詢看到的是敘述開始時的資料：新寫入時它查不到這一筆（回傳 NULL），
+	// 只有在鍵已存在時才會回傳比對結果。
+	var same *bool
+	err = s.pool.QueryRow(ctx,
+		`WITH ins AS (
+		   INSERT INTO readings (uni_id, device_id, seq, record_time, freq)
+		   VALUES ($1::uuid, $2::text, $3::bigint, $4::timestamptz, $5::integer)
+		   ON CONFLICT (uni_id, record_time) DO NOTHING
+		   RETURNING 1
+		 )
+		 SELECT EXISTS (SELECT 1 FROM ins),
+		        (SELECT device_id = $2::text AND seq = $3::bigint AND freq = $5::integer
+		           FROM readings
+		          WHERE uni_id = $1::uuid AND record_time = $4::timestamptz)`,
 		r.UniID.String(), r.DeviceID, r.Seq, r.RecordTime, r.Freq,
-	)
+	).Scan(&inserted, &same)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == sqlStateForeignKeyViolation {
+			// readings 只有 device_id 這一個 foreign key
+			return false, fmt.Errorf("insert reading %s: %w: %s", r.UniID, ErrUnknownDevice, r.DeviceID)
+		}
 		return false, fmt.Errorf("insert reading %s: %w", r.UniID, err)
 	}
-	return tag.RowsAffected() == 1, nil
+	if !inserted && same != nil && !*same {
+		return false, fmt.Errorf("insert reading %s: %w", r.UniID, ErrKeyConflict)
+	}
+	return inserted, nil
 }
 
 // ReadingQuery 是查詢條件；零值欄位代表不過濾。

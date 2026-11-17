@@ -138,6 +138,50 @@ func TestNotify_WebhookFailureDoesNotPanicOrBlock(t *testing.T) {
 	}
 }
 
+func TestNotify_FailedDeliveryDoesNotSilenceTheKind(t *testing.T) {
+	// 修正前：送失敗的那一則仍然啟動了一分鐘的節流，
+	// 所以 webhook 短暫失敗一次，接下來一分鐘同類告警全部不見。
+	n, s, clock := setup(t)
+	ctx := context.Background()
+
+	s.mu.Lock()
+	s.status = http.StatusInternalServerError
+	s.mu.Unlock()
+	n.Notify(ctx, Alert{Kind: "dlq", Message: "first"}) // 送出，但 webhook 回 500
+
+	// 緊接著的幾則不會立刻重試（webhook 掛掉時不該每一則都去等一次逾時）
+	for range 3 {
+		clock.advance(time.Second)
+		n.Notify(ctx, Alert{Kind: "dlq", Message: "soon after"})
+	}
+	if got := len(s.all()); got != 1 {
+		t.Fatalf("received %d requests right after a failure, want 1 (no immediate retry storm)", got)
+	}
+
+	// webhook 恢復。過了 retryAfter 之後的下一則要送得出去，不必等滿一分鐘
+	s.mu.Lock()
+	s.status = 0
+	s.mu.Unlock()
+	clock.advance(retryAfter)
+	n.Notify(ctx, Alert{Kind: "dlq", Message: "after recovery"})
+
+	got := s.all()
+	if len(got) != 2 {
+		t.Fatalf("received %d requests, want 2: the alert after recovery was throttled", len(got))
+	}
+	// 沒送成功的那一則與之後被擋下的 3 則，都要算進「尚未通知」的數量
+	if got[1].Message != "after recovery" || got[1].Suppressed != 4 {
+		t.Errorf("message = %q suppressed = %d, want the recovery alert carrying 4 unreported alerts", got[1].Message, got[1].Suppressed)
+	}
+
+	// 送成功之後恢復正常的一分鐘節流
+	clock.advance(10 * time.Second)
+	n.Notify(ctx, Alert{Kind: "dlq", Message: "throttled again"})
+	if len(s.all()) != 2 {
+		t.Error("normal throttling did not resume after a successful delivery")
+	}
+}
+
 func TestNotify_EmptyURLOnlyLogs(t *testing.T) {
 	n := New("", "receiver", time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	n.Notify(context.Background(), Alert{Kind: "dlq", Message: "m"}) // 不應該嘗試連線或 panic

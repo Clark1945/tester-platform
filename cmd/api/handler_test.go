@@ -31,9 +31,18 @@ func (f *fakeStore) QueryReadings(_ context.Context, q store.ReadingQuery) ([]mo
 	return []model.Reading{}, f.failWith
 }
 
-type fakeDevices map[string]bool
+// fakeDevices 模擬 devices.Cache：已知的直接回 true；不認得的要「向資料庫確認」，確認可能失敗
+type fakeDevices struct {
+	known     map[string]bool
+	lookupErr error
+}
 
-func (f fakeDevices) Exists(id string) bool { return f[id] }
+func (f *fakeDevices) Check(_ context.Context, id string) (bool, error) {
+	if f.known[id] {
+		return true, nil
+	}
+	return false, f.lookupErr
+}
 
 type fakePublisher struct {
 	failWith     error
@@ -57,14 +66,16 @@ type fixture struct {
 	store   *fakeStore
 	pub     *fakePublisher
 	metrics *metrics.APICounters
+	devices *fakeDevices
 	srv     http.Handler
 }
 
 func newFixture() *fixture {
-	f := &fixture{store: &fakeStore{}, pub: &fakePublisher{}, metrics: metrics.NewAPICounters()}
+	f := &fixture{store: &fakeStore{}, pub: &fakePublisher{}, metrics: metrics.NewAPICounters(),
+		devices: &fakeDevices{known: map[string]bool{"device-001": true}}}
 	h := &handler{
 		store:     f.store,
-		devices:   fakeDevices{"device-001": true},
+		devices:   f.devices,
 		publisher: f.pub,
 		metrics:   f.metrics,
 		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -167,12 +178,38 @@ func TestPostReading_UnconfirmedPublishReturns503(t *testing.T) {
 }
 
 func TestPostReading_DoesNotNeedDatabase(t *testing.T) {
-	// 資料庫故障時 api 仍要能收資料
+	// 資料庫故障時，已知的 device 仍要能送資料
 	f := newFixture()
 	f.store.failWith = errors.New("db down")
+	f.devices.lookupErr = errors.New("db down")
 
 	if rec := f.do(t, http.MethodPost, "/v1/readings", validBody); rec.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202 even when the database is down", rec.Code)
+	}
+}
+
+func TestPostReading_UnconfirmableDeviceIs503Not404(t *testing.T) {
+	// 快取裡沒有這台 device，資料庫又查不了：不能說它不存在。
+	// 404 對 device 的意思是「不要重試」；它若其實是剛註冊的合法 device，資料就永久遺失了。
+	f := newFixture()
+	f.devices.lookupErr = errors.New("db down")
+	body := strings.Replace(validBody, "device-001", "device-101", 1)
+
+	rec := f.do(t, http.MethodPost, "/v1/readings", body)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 so that the device retries", rec.Code)
+	}
+	if len(f.pub.published) != 0 {
+		t.Error("an unconfirmed device was published")
+	}
+	if f.metrics.LookupFailed.Load() != 1 || f.metrics.Rejected4xx.Load() != 0 {
+		t.Errorf("lookup_failed = %d rejected_4xx = %d, want 1 and 0", f.metrics.LookupFailed.Load(), f.metrics.Rejected4xx.Load())
+	}
+
+	// 資料庫恢復、確認它不存在之後，才是 404
+	f.devices.lookupErr = nil
+	if rec := f.do(t, http.MethodPost, "/v1/readings", body); rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 once the database confirms the device is unknown", rec.Code)
 	}
 }
 

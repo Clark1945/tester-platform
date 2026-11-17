@@ -34,7 +34,8 @@ type queryStore interface {
 }
 
 type deviceChecker interface {
-	Exists(deviceID string) bool
+	// Check 回報 device 是否存在；無法確認時回傳錯誤（見 devices.Cache.Check）
+	Check(ctx context.Context, deviceID string) (bool, error)
 }
 
 type publisher interface {
@@ -89,8 +90,18 @@ func (h *handler) postReading(w http.ResponseWriter, r *http.Request) {
 
 	log := h.log.With("device_id", reading.DeviceID, "uni_id", reading.UniID, "seq", reading.Seq)
 
-	// 只查記憶體快取，不碰資料庫：資料庫故障時 api 仍能收資料
-	if !h.devices.Exists(reading.DeviceID) {
+	// 已知的 device 只查記憶體快取，不碰資料庫：資料庫故障時 api 仍能收資料。
+	// 快取裡沒有的才向資料庫確認一次。
+	known, err := h.devices.Check(ctx, reading.DeviceID)
+	if err != nil {
+		// 確認不了，不代表不存在。回 503 讓 device 重試——回 404 的話它就不會再送，
+		// 而這可能是一台剛註冊、快取還沒刷新的合法 device。
+		h.metrics.Observe(metrics.APILookupFailed, time.Since(start))
+		log.Warn("cannot confirm device", "error", err)
+		h.writeError(w, http.StatusServiceUnavailable, "service unavailable")
+		return
+	}
+	if !known {
 		h.metrics.Observe(metrics.APIRejected, time.Since(start))
 		h.writeError(w, http.StatusNotFound, "unknown device_id")
 		return

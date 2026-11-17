@@ -108,6 +108,12 @@ func (p *Publisher) session(ctx context.Context, onConnected func()) error {
 		case amqpErr := <-chClosed:
 			return closeError("channel", amqpErr)
 		case req := <-p.reqs:
+			// 這個請求在排隊時就已經逾時或被取消（例如 client 斷線）：直接回覆，不碰 amqp channel。
+			// 這是「這一個請求」的問題，不是連線的問題。
+			if err := req.ctx.Err(); err != nil {
+				req.reply <- publishReply{err: err}
+				continue
+			}
 			confirm, err := ch.PublishWithDeferredConfirmWithContext(
 				req.ctx,
 				"",      // default exchange：routing key 就是 queue 名稱
@@ -117,12 +123,20 @@ func (p *Publisher) session(ctx context.Context, onConnected func()) error {
 				req.msg,
 			)
 			req.reply <- publishReply{confirm: confirm, err: err}
-			if err != nil {
-				// 發佈失敗後這條 channel 的狀態不可信，直接重建連線
+			if err != nil && !requestScoped(err) {
+				// 連線或 channel 層級的失敗：這條 channel 的狀態不可信，重建連線。
+				// 只因為單一請求的 context 到期就拆掉連線的話，其他正在等 confirm 的請求
+				// 會全部跟著失敗，一個慢請求被放大成一波 503。
 				return fmt.Errorf("publish: %w", err)
 			}
 		}
 	}
+}
+
+// requestScoped 回報這個錯誤是否只屬於單一請求（它自己的 context 到期或被取消），
+// 與連線是否健康無關。
+func requestScoped(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // Publish 發佈一筆 persistent 訊息，並等到 broker 確認後才返回 nil。

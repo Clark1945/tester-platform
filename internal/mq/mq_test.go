@@ -77,6 +77,56 @@ func waitConnected(t *testing.T, connected func() bool) {
 	}
 }
 
+func TestRequestScoped(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{context.Canceled, true},
+		{context.DeadlineExceeded, true},
+		{fmt.Errorf("publish: %w", context.DeadlineExceeded), true},
+		{amqp.ErrClosed, false},
+		{errors.New("write tcp: broken pipe"), false},
+	}
+	for _, tc := range cases {
+		if got := requestScoped(tc.err); got != tc.want {
+			t.Errorf("requestScoped(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestPublish_ExpiredRequestDoesNotTearDownTheConnection(t *testing.T) {
+	// 修正前：任何一次發佈失敗都會重建連線。一個已經逾時的請求會連累其他正在等 confirm 的請求。
+	url := testURL(t)
+	queue := tempQueue(t, url)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var running sync.WaitGroup
+	t.Cleanup(func() { cancel(); running.Wait() })
+
+	pub := NewPublisher(url, queue, 5*time.Second, quietLog())
+	running.Add(1)
+	go func() { defer running.Done(); pub.Run(ctx) }()
+	waitConnected(t, pub.Connected)
+
+	expired, cancelExpired := context.WithCancel(context.Background())
+	cancelExpired()
+
+	for i := range 200 {
+		// 已取消的請求：一定失敗，而且是這個請求自己的失敗
+		if err := pub.Publish(expired, Message{ID: "dead", Body: []byte("x")}); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("round %d: expired publish err = %v, want ErrUnavailable", i, err)
+		}
+		// 緊接著的正常請求必須成功：連線若被拆掉，這裡會得到 not connected
+		if err := pub.Publish(ctx, Message{ID: fmt.Sprintf("ok-%d", i), Body: []byte("y")}); err != nil {
+			t.Fatalf("round %d: healthy publish failed right after an expired one: %v", i, err)
+		}
+		if !pub.Connected() {
+			t.Fatalf("round %d: connection was dropped", i)
+		}
+	}
+}
+
 func TestPublishAndConsume_RoundTrip(t *testing.T) {
 	url := testURL(t)
 	queue := tempQueue(t, url)

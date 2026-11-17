@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"tester-receiver/internal/mq"
 	"tester-receiver/internal/notify"
 	"tester-receiver/internal/retry"
+	"tester-receiver/internal/store"
 )
 
 // fakeStore 可以排定「接下來幾次寫入要回什麼錯誤」，用來模擬各種故障。
@@ -35,10 +37,7 @@ func newFakeStore() *fakeStore {
 
 func (f *fakeStore) Ping(context.Context) error { return f.pingErr }
 
-func (f *fakeStore) DeviceExists(_ context.Context, id string) (bool, error) {
-	return f.devices[id], nil
-}
-
+// 和真的 store 一樣：device 不存在時由「寫入」回報 ErrUnknownDevice（foreign key），沒有另外的查詢
 func (f *fakeStore) InsertReading(_ context.Context, r model.Reading) (bool, error) {
 	f.inserts++
 	if f.panicWith != nil {
@@ -48,6 +47,9 @@ func (f *fakeStore) InsertReading(_ context.Context, r model.Reading) (bool, err
 		err := f.insertErrs[0]
 		f.insertErrs = f.insertErrs[1:]
 		return false, err
+	}
+	if !f.devices[r.DeviceID] {
+		return false, fmt.Errorf("insert reading: %w: %s", store.ErrUnknownDevice, r.DeviceID)
 	}
 	key := r.UniID.String()
 	if f.rows[key] {
@@ -184,7 +186,11 @@ func TestHandle_PermanentErrorsGoToDLQWithoutRetry(t *testing.T) {
 	}{
 		{"unparseable payload", `not json`, nil, reasonInvalidPayload, 0},
 		{"missing field", `{"device_id":"device-001"}`, nil, reasonInvalidPayload, 0},
-		{"unknown device", validMsg, func(s *fakeStore) { delete(s.devices, "device-001") }, reasonUnknownDevice, 0},
+		// 未知 device 與鍵衝突都是寫入時才發現的，所以各嘗試 1 次；重點是不會重試
+		{"unknown device", validMsg, func(s *fakeStore) { delete(s.devices, "device-001") }, reasonUnknownDevice, 1},
+		{"key reused with different content", validMsg, func(s *fakeStore) {
+			s.insertErrs = []error{fmt.Errorf("insert reading: %w", store.ErrKeyConflict)}
+		}, reasonKeyConflict, 1},
 		{"constraint violation", validMsg, func(s *fakeStore) { s.insertErrs = []error{errFKViolated} }, reasonPermanentError, 1},
 	}
 	for _, tc := range cases {

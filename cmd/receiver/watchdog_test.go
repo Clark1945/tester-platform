@@ -152,6 +152,50 @@ func TestWatchdog_NoWritesWhileQueueNotEmpty(t *testing.T) {
 	}
 }
 
+func TestWatchdog_DuplicatesAndDeadLettersCountAsProgress(t *testing.T) {
+	// receiver 持續在消化，但結果都不是「新寫入」：重新投遞的全是重複，或一批全是毒訊息。
+	// 修正前只看最後一次新寫入的時間，會在這裡誤報 no_writes。
+	h := newWatchHarness()
+	h.setQueue(0, 50)
+	for i := range 6 {
+		if i%2 == 0 {
+			h.w.counters.Duplicate.Add(1)
+		} else {
+			h.w.counters.DLQ.Add(1)
+		}
+		h.w.counters.MarkSettled(h.clock)
+		if kinds := h.tick(); contains(kinds, alertKindNoWrites) {
+			t.Fatalf("tick %d: alerted although messages were being settled: %v", i, kinds)
+		}
+	}
+	if !h.w.counters.LastWrittenAt().IsZero() {
+		t.Fatal("test setup is wrong: nothing should have been written")
+	}
+
+	// 真的停下來之後仍然要告警
+	h.tick()
+	h.tick()
+	if kinds := h.tick(); !contains(kinds, alertKindNoWrites) {
+		t.Errorf("alerts = %v, want %s once nothing is settled any more", kinds, alertKindNoWrites)
+	}
+}
+
+func TestWaitFor(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	if !waitFor(done, time.Minute) {
+		t.Error("waitFor should return true immediately when the channel is already closed")
+	}
+
+	start := time.Now()
+	if waitFor(make(chan struct{}), 30*time.Millisecond) {
+		t.Error("waitFor should report a timeout when nothing closes the channel")
+	}
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond || elapsed > time.Second {
+		t.Errorf("waitFor returned after %v, want about 30ms", elapsed)
+	}
+}
+
 func TestWatchdog_DepthUnavailableDoesNotAlertOrPanic(t *testing.T) {
 	h := newWatchHarness()
 	h.depths.err = errors.New("management api down")

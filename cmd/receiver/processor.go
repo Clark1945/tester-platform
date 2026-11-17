@@ -15,12 +15,14 @@ import (
 	"tester-receiver/internal/mq"
 	"tester-receiver/internal/notify"
 	"tester-receiver/internal/retry"
+	"tester-receiver/internal/store"
 )
 
 // 進 DLQ 的原因，寫在訊息的 x-failure-reason header。
 const (
 	reasonInvalidPayload   = "invalid_payload"
 	reasonUnknownDevice    = "unknown_device"
+	reasonKeyConflict      = "key_conflict" // 同一個 uni_id + record_time 出現了內容不同的資料
 	reasonPermanentError   = "permanent_error"
 	reasonRetriesExhausted = "retries_exhausted"
 	reasonPanic            = "panic"
@@ -28,11 +30,8 @@ const (
 
 const alertKindDLQ = "dlq"
 
-var errUnknownDevice = errors.New("unknown device")
-
 type readingStore interface {
 	Ping(ctx context.Context) error
-	DeviceExists(ctx context.Context, deviceID string) (bool, error)
 	InsertReading(ctx context.Context, r model.Reading) (bool, error)
 }
 
@@ -147,8 +146,11 @@ func (p *processor) handle(ctx context.Context, d amqp.Delivery) {
 		switch class {
 		case retry.Permanent:
 			reason := reasonPermanentError
-			if errors.Is(err, errUnknownDevice) {
+			switch {
+			case errors.Is(err, store.ErrUnknownDevice):
 				reason = reasonUnknownDevice
+			case errors.Is(err, store.ErrKeyConflict):
+				reason = reasonKeyConflict
 			}
 			p.deadLetter(ctx, j, reason, err, attempt+1)
 			return
@@ -178,20 +180,14 @@ func (p *processor) handle(ctx context.Context, d amqp.Delivery) {
 	}
 }
 
-// write 嘗試一次「檢查 device → 寫入」。
+// write 嘗試寫入一次。
+//
+// device 是否存在由資料庫的 foreign key 把關（store 會回報 ErrUnknownDevice），這裡不另外查詢。
+// api 的快取只是前置過濾；這個 foreign key 才是權威，而且檢查與寫入是同一個動作。
 func (p *processor) write(ctx context.Context, reading model.Reading) (inserted bool, err error) {
 	// 用不受關閉訊號影響的 context：服務關閉時，已開始的寫入要做完
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.timeout)
 	defer cancel()
-
-	// api 的快取只是前置過濾，這裡的資料庫檢查才是權威
-	exists, err := p.store.DeviceExists(ctx, reading.DeviceID)
-	if err != nil {
-		return false, fmt.Errorf("check device: %w", err)
-	}
-	if !exists {
-		return false, fmt.Errorf("%w: %s", errUnknownDevice, reading.DeviceID)
-	}
 
 	inserted, err = p.store.InsertReading(ctx, reading)
 	if err != nil {
@@ -200,9 +196,9 @@ func (p *processor) write(ctx context.Context, reading model.Reading) (inserted 
 	return inserted, nil
 }
 
-// classify 在資料庫錯誤分類之上，加上本服務自己定義的永久錯誤。
+// classify 在資料庫錯誤分類之上，加上這兩種「資料本身有問題」的永久錯誤。
 func classify(err error) retry.Class {
-	if errors.Is(err, errUnknownDevice) {
+	if errors.Is(err, store.ErrUnknownDevice) || errors.Is(err, store.ErrKeyConflict) {
 		return retry.Permanent
 	}
 	return retry.Classify(err)

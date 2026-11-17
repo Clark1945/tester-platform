@@ -2,7 +2,10 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,14 +114,88 @@ func TestInsertReading_Idempotent(t *testing.T) {
 	}
 }
 
-func TestInsertReading_UnknownDeviceFails(t *testing.T) {
+func TestInsertReading_UnknownDeviceIsReportedAsSuch(t *testing.T) {
 	s, ctx := newTestStore(t)
 	r := testReading(1)
 	r.DeviceID = "no-such-device"
 
-	if _, err := s.InsertReading(ctx, r); err == nil {
+	_, err := s.InsertReading(ctx, r)
+	if err == nil {
 		cleanup(t, s, r.UniID)
-		t.Fatal("expected foreign key violation, got nil")
+		t.Fatal("expected an error, got nil")
+	}
+	// receiver 靠這個錯誤判斷「device 不存在」，所以它必須認得出來
+	if !errors.Is(err, ErrUnknownDevice) {
+		t.Errorf("err = %v, want ErrUnknownDevice", err)
+	}
+}
+
+func TestInsertReading_SameKeyDifferentContentIsAConflict(t *testing.T) {
+	s, ctx := newTestStore(t)
+	first := testReading(20)
+	cleanup(t, s, first.UniID)
+	if _, err := s.InsertReading(ctx, first); err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+
+	// 每個案例：鍵（uni_id, record_time）相同，但有一個欄位不同
+	cases := map[string]func(*model.Reading){
+		"different seq":    func(r *model.Reading) { r.Seq = 21 },
+		"different freq":   func(r *model.Reading) { r.Freq = 999 },
+		"different device": func(r *model.Reading) { r.DeviceID = "device-002" },
+	}
+	for name, change := range cases {
+		t.Run(name, func(t *testing.T) {
+			other := first
+			change(&other)
+			inserted, err := s.InsertReading(ctx, other)
+			if !errors.Is(err, ErrKeyConflict) {
+				t.Fatalf("err = %v, want ErrKeyConflict (inserted = %v)", err, inserted)
+			}
+		})
+	}
+
+	// 內容完全相同才是重送：不報錯，也不新增
+	inserted, err := s.InsertReading(ctx, first)
+	if err != nil || inserted {
+		t.Errorf("true resend: inserted = %v err = %v, want false and nil", inserted, err)
+	}
+
+	// 原本那一筆沒有被改動
+	var seq int64
+	var count int
+	if err := s.pool.QueryRow(ctx, `SELECT max(seq), count(*) FROM readings WHERE uni_id = $1`, first.UniID.String()).Scan(&seq, &count); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if seq != 20 || count != 1 {
+		t.Errorf("stored seq = %d count = %d, want 20 and 1", seq, count)
+	}
+}
+
+func TestInsertReading_ConcurrentResendsInsertOnce(t *testing.T) {
+	// 同一筆同時送 20 次：只能有一次是新寫入，其餘都是重複，而且不能有錯誤
+	s, ctx := newTestStore(t)
+	r := testReading(30)
+	cleanup(t, s, r.UniID)
+
+	var wg sync.WaitGroup
+	var insertedCount, errCount atomic.Int32
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inserted, err := s.InsertReading(ctx, r)
+			if err != nil {
+				errCount.Add(1)
+				t.Errorf("concurrent insert: %v", err)
+			} else if inserted {
+				insertedCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if insertedCount.Load() != 1 || errCount.Load() != 0 {
+		t.Errorf("inserted %d times with %d errors, want exactly 1 and 0", insertedCount.Load(), errCount.Load())
 	}
 }
 

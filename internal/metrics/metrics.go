@@ -28,6 +28,7 @@ const (
 	APIAccepted      APIOutcome = "accepted"       // broker 已確認，回 202
 	APIRejected      APIOutcome = "rejected"       // payload / device 有問題，回 4xx
 	APIPublishFailed APIOutcome = "publish_failed" // 未獲 broker 確認，回 503
+	APILookupFailed  APIOutcome = "lookup_failed"  // 快取裡沒有這台 device，又無法向資料庫確認，回 503
 )
 
 // APICounters 是 api 服務的指標。欄位是 atomic，可被多個 goroutine 同時累加。
@@ -38,6 +39,7 @@ type APICounters struct {
 	Accepted      atomic.Int64
 	Rejected4xx   atomic.Int64
 	PublishFailed atomic.Int64
+	LookupFailed  atomic.Int64
 
 	requestSeconds *prometheus.HistogramVec
 	registry       *prometheus.Registry
@@ -64,6 +66,7 @@ func NewAPICounters() *APICounters {
 		counterFunc(name, help, string(APIAccepted), &c.Accepted),
 		counterFunc(name, help, string(APIRejected), &c.Rejected4xx),
 		counterFunc(name, help, string(APIPublishFailed), &c.PublishFailed),
+		counterFunc(name, help, string(APILookupFailed), &c.LookupFailed),
 		c.requestSeconds,
 	)
 	return c
@@ -78,6 +81,8 @@ func (c *APICounters) Observe(outcome APIOutcome, elapsed time.Duration) {
 		c.Rejected4xx.Add(1)
 	case APIPublishFailed:
 		c.PublishFailed.Add(1)
+	case APILookupFailed:
+		c.LookupFailed.Add(1)
 	}
 	if c.requestSeconds != nil {
 		c.requestSeconds.WithLabelValues(string(outcome)).Observe(elapsed.Seconds())
@@ -96,6 +101,7 @@ func (c *APICounters) Snapshot() map[string]any {
 		"accepted":       c.Accepted.Load(),
 		"rejected_4xx":   c.Rejected4xx.Load(),
 		"publish_failed": c.PublishFailed.Load(),
+		"lookup_failed":  c.LookupFailed.Load(),
 	}
 }
 
@@ -128,6 +134,7 @@ type ReceiverCounters struct {
 	Requeued  atomic.Int64
 
 	lastWrittenAt atomic.Int64 // UnixNano；0 代表尚未寫入過
+	lastSettledAt atomic.Int64 // UnixNano；最後一次有訊息得到明確結局（寫入、重複或進 DLQ）
 
 	processSeconds *prometheus.HistogramVec
 	registry       *prometheus.Registry
@@ -175,9 +182,11 @@ func (c *ReceiverCounters) Settle(outcome ReceiverOutcome, elapsed time.Duration
 		c.MarkWritten(time.Now())
 	case ReceiverDuplicate:
 		c.Duplicate.Add(1)
+		c.lastSettledAt.Store(time.Now().UnixNano())
 	case ReceiverDLQ:
 		c.DLQ.Add(1)
-	case ReceiverRequeued:
+		c.lastSettledAt.Store(time.Now().UnixNano())
+	case ReceiverRequeued: // 還給 queue 不算進展：訊息還在，只是換個時間再處理
 		c.Requeued.Add(1)
 	}
 	if c.processSeconds != nil {
@@ -194,6 +203,24 @@ func (c *ReceiverCounters) RegisterGauge(name, help string, value func() float64
 func (c *ReceiverCounters) MarkWritten(now time.Time) {
 	c.Written.Add(1)
 	c.lastWrittenAt.Store(now.UnixNano())
+	c.lastSettledAt.Store(now.UnixNano())
+}
+
+// MarkSettled 記錄「有訊息得到明確結局」的時間，供測試以指定的時間模擬重複或進 DLQ。
+func (c *ReceiverCounters) MarkSettled(now time.Time) {
+	c.lastSettledAt.Store(now.UnixNano())
+}
+
+// LastSettledAt 回傳最後一次有訊息得到明確結局的時間；從未有過時回傳零值。
+//
+// watchdog 用它判斷 receiver 有沒有在做事。不能只看 LastWrittenAt：
+// 一批重新投遞的訊息全是重複、或一批全是毒訊息時，receiver 明明在正常消化，卻沒有任何「新寫入」。
+func (c *ReceiverCounters) LastSettledAt() time.Time {
+	ns := c.lastSettledAt.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns).UTC()
 }
 
 // LastWrittenAt 回傳最後一次成功寫入的時間；從未寫入時回傳零值。

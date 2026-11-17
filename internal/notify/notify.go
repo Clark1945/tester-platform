@@ -13,7 +13,11 @@ import (
 	"time"
 )
 
-const sendTimeout = 3 * time.Second
+const (
+	sendTimeout = 3 * time.Second
+	// 告警送失敗後，隔多久允許下一則同類告警再試一次
+	retryAfter = 5 * time.Second
+)
 
 // Alert 是一則告警。Kind 是節流的單位：同一種 Kind 在間隔內只會送出一次。
 type Alert struct {
@@ -86,6 +90,25 @@ func (n *Notifier) Notify(ctx context.Context, a Alert) {
 	}
 	if err := n.send(ctx, p); err != nil {
 		n.log.Error("webhook delivery failed", "kind", a.Kind, "error", err)
+		n.sendFailed(a.Kind, suppressed)
+	}
+}
+
+// sendFailed 在告警送不出去時，把節流的狀態調回來。
+//
+// admit 在送出之前就開始計算節流間隔。如果送失敗卻什麼都不做，這則告警等於沒發出，
+// 而接下來一整個間隔內的同類告警又都被節流掉——webhook 一次短暫的失敗，會換來一整分鐘的靜默。
+//
+// 做法是把下次可以送的時間提前到 retryAfter 之後，並把這一則（連同它帶著的累計數）算回
+// 「尚未通知」的數量。不是立刻重試：webhook 真的掛掉時，每一則告警都去等一次逾時，
+// 只會拖慢訊息處理。
+func (n *Notifier) sendFailed(kind string, carried int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.suppressed[kind] += carried + 1
+	if n.minInterval > retryAfter {
+		n.lastSent[kind] = n.now().Add(retryAfter - n.minInterval)
 	}
 }
 

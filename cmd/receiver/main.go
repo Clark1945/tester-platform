@@ -23,7 +23,21 @@ import (
 	"tester-receiver/internal/store"
 )
 
-const shutdownTimeout = 10 * time.Second
+// 等處理中的訊息收尾的上限。最壞情況是一次資料庫逾時（5 秒）加一次 DLQ 發佈（5 秒），
+// 所以要比 10 秒長；同時要比容器的停止寬限（compose 設為 20 秒）短，才輪得到自己結束。
+const shutdownTimeout = 15 * time.Second
+
+// waitFor 等 done 被關閉，回報是否在期限內等到。
+func waitFor(done <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "receiver")
@@ -49,7 +63,14 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("connect database: %w", err)
 	}
-	defer st.Close()
+	// 連線池只在「乾淨關閉」時才關。pool.Close() 會等所有連線歸還；
+	// 若 worker 還卡在處理中，它會跟著卡住，拖到被容器 SIGKILL。
+	closePool := true
+	defer func() {
+		if closePool {
+			st.Close()
+		}
+	}()
 
 	// DLQ 的 publisher 用自己的連線，並且要活得比 consumer 久：
 	// 關閉途中仍在處理的訊息可能還需要進 DLQ。所以不直接用會被 signal 取消的 ctx。
@@ -143,18 +164,20 @@ func run(logger *slog.Logger) error {
 	}
 
 	// 優雅關閉：先等 consumer 把處理中的訊息做完並 ack，再關 HTTP 與資料庫連線池
-	select {
-	case <-consumerDone:
-	case <-time.After(shutdownTimeout):
-		// 逾時就放棄等待：未 ack 的訊息會在連線關閉後由 broker 重新投遞，不會遺失
-		logger.Warn("consumer did not stop in time; unacked messages will be redelivered")
+	if !waitFor(consumerDone, shutdownTimeout) {
+		// 逾時：worker 還在處理中。這時不能照常收尾——
+		// 先停 DLQ publisher 會讓還在跑的 worker 進不了 DLQ、轉而等待重試；關連線池則會卡住等它們。
+		// 兩者都只會把關閉拖得更久。直接結束行程：未 ack 的訊息在連線中斷後由 broker 重新投遞，
+		// 已寫入但來不及 ack 的會被冪等寫入擋下，所以不會遺失也不會重複。
+		closePool = false
+		return errors.New("shutdown timed out with messages still in flight; the broker will redeliver them")
 	}
 
 	// consumer 停了之後才停 DLQ publisher
 	stopDLQ()
 	<-dlqDone
 
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil && runErr == nil {
 		runErr = fmt.Errorf("shutdown http server: %w", err)

@@ -113,14 +113,21 @@ func run() (bool, error) {
 			return false, fmt.Errorf("docker access check: %w", err)
 		}
 	}
-	step("preflight: truncating readings and purging queues")
-	if err := st.TruncateReadings(ctx); err != nil {
-		return false, err
-	}
+	// 清場的順序：先清 queue，等 receiver 把手上的訊息處理完，最後才清資料表。
+	// purge 只清得掉「等待中」的訊息；receiver 已經取走（unacked）的那些不受影響，
+	// 如果先清資料表，它們會在清完之後才寫入，對帳時就多出不屬於這次執行的資料。
+	step("preflight: purging queues and waiting for in-flight messages to settle")
 	for _, q := range []string{o.queue, o.queue + ".dlq"} {
 		if err := mgmt.PurgeQueue(ctx, q); err != nil {
 			return false, err
 		}
+	}
+	if err := waitQuiet(ctx, mgmt, o.queue, time.Minute); err != nil {
+		return false, err
+	}
+	step("preflight: truncating readings")
+	if err := st.TruncateReadings(ctx); err != nil {
+		return false, err
 	}
 
 	// ---- 2. 流量 + 故障注入 ----
@@ -228,6 +235,51 @@ func outage(ctx context.Context, d time.Duration, service string, stop, start fu
 		return err
 	}
 	return sleepErr
+}
+
+type depthReader interface {
+	QueueDepth(ctx context.Context, queue string) (mq.QueueDepth, error)
+}
+
+const (
+	quietPolls        = 4 // 管理 API 的數字約 5 秒更新一次，所以要連續觀察幾次
+	quietPollInterval = 2 * time.Second
+)
+
+// waitQuiet 等到 queue 完全沒有訊息（等待中與處理中都是 0），並且連續 quietPolls 次都是如此。
+// 還有別的來源在送資料（例如另一個 simulator 沒關）時它不會安靜下來，此時回報錯誤而不是硬跑。
+func waitQuiet(ctx context.Context, queues depthReader, queue string, timeout time.Duration) error {
+	return waitQuietEvery(ctx, queues, queue, timeout, quietPollInterval)
+}
+
+func waitQuietEvery(ctx context.Context, queues depthReader, queue string, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var (
+		quiet int
+		last  mq.QueueDepth
+	)
+	for {
+		depth, err := queues.QueueDepth(ctx, queue)
+		if err != nil {
+			return fmt.Errorf("preflight: %w", err)
+		}
+		last = depth
+		if depth.Total() == 0 {
+			quiet++
+		} else {
+			quiet = 0
+		}
+		if quiet >= quietPolls {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("preflight: queue %s is still busy after %s (ready=%d unacked=%d); is something else sending traffic?",
+				queue, timeout, last.Ready, last.Unacked)
+		}
+		if err := retry.Sleep(ctx, interval); err != nil {
+			return err
+		}
+	}
 }
 
 func restoreAll(docker *dockerClient) {
