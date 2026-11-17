@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tester Receiver 流程監控</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%230E7C66' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='4.5' fill='%230E7C66'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wdth,wght@75..100,400..700&display=swap" rel="stylesheet">
+<style>
+  /* 一條訊號路徑。節點是線上的點，Queue 是線上的一段蓄水段。
+     顏色只有一個用途：青綠是「在流動」，琥珀與紅保留給異常。 */
+  :root {
+    --paper: #F2F4F1; --ink: #1C2B2A; --muted: #62716E; --line: #C6CFCA; --faint: #E3E8E4;
+    --flow: #0E7C66;  --warn: #8C5600; --bad: #BE3B26;  --off: #8B9794;   /* warn 原為 #A9690A，文字對比 4.03 未達 4.5 */
+    --flow-soft: rgba(14, 124, 102, .12); --warn-soft: rgba(169, 105, 10, .13); --bad-soft: rgba(190, 59, 38, .12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #101614; --ink: #E4EBE7; --muted: #8FA09B; --line: #33423D; --faint: #1C2623;
+      --flow: #4FD1A5;  --warn: #E3AD45; --bad: #F2806A;  --off: #62726D;
+      --flow-soft: rgba(79, 209, 165, .14); --warn-soft: rgba(227, 173, 69, .15); --bad-soft: rgba(242, 128, 106, .15);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: "Instrument Sans", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+    font-size: 16px; line-height: 1.5; font-variant-numeric: tabular-nums;
+    padding: 28px clamp(20px, 5vw, 72px) 40px;
+    max-width: 1440px; margin-inline: auto;
+  }
+  .num { font-stretch: 85%; }
+
+  .top { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; color: var(--muted); font-size: .95rem; }
+  .top strong { color: var(--ink); font-weight: 600; white-space: nowrap; }
+  #stamp { text-align: right; }
+  #stamp.alert { color: var(--bad); font-weight: 600; }
+  #stamp.preview { color: var(--warn); font-weight: 600; }
+
+  /* 標題就是系統狀態 */
+  .status { margin: clamp(20px, 4vw, 44px) 0 clamp(8px, 2vw, 20px); min-height: 7.2rem; }
+  .status h1 {
+    margin: 0; font-size: clamp(2rem, 4.4vw, 3.4rem); font-weight: 600; line-height: 1.12; letter-spacing: -.012em;
+    display: flex; align-items: center; gap: .38em;
+  }
+  .glyph {
+    flex: none; display: inline-grid; place-items: center; width: .82em; height: .82em; border-radius: 50%;
+    font-size: .9em; background: var(--flow); color: var(--paper); transition: background-color .35s;
+  }
+  .glyph::before { content: attr(data-g); font-size: .52em; font-weight: 700; line-height: 1; }
+  .status.warn .glyph { background: var(--warn); } .status.bad .glyph { background: var(--bad); } .status.off .glyph { background: var(--off); }
+  .status p { margin: .5rem 0 0; color: var(--muted); font-size: 1.08rem; max-width: 62ch; }
+
+  /* 架構圖 */
+  .diagram { overflow-x: auto; margin-inline: -8px; padding-inline: 8px; scrollbar-width: thin; }
+  .diagram svg { display: block; width: 100%; min-width: 780px; height: auto; }
+
+  .edge { stroke: var(--line); stroke-width: 1.5; transition: stroke .35s, stroke-width .35s; }
+  .edge.warn { stroke: var(--warn); stroke-width: 2.5; }
+  .edge.bad { stroke: var(--bad); stroke-width: 2.5; stroke-dasharray: 3 7; stroke-linecap: round; }
+  .edge.off { stroke: var(--line); stroke-dasharray: 2 6; }
+  .edge-note { font-size: 13.5px; font-weight: 600; text-anchor: middle; fill: var(--muted); }
+  .edge-note.warn { fill: var(--warn); } .edge-note.bad { fill: var(--bad); }
+  .particle { fill: var(--flow); }
+
+  .node { cursor: pointer; outline: none; }
+  .node .hit { fill: transparent; }
+  .node .ring { fill: var(--paper); stroke: var(--ink); stroke-width: 1.5; transition: stroke .35s, stroke-width .2s, fill .35s; }
+  .node .outer { fill: none; stroke: var(--ink); stroke-width: 1; opacity: .45; transition: stroke .35s; }
+  .node .core { fill: var(--flow); transition: fill .35s, opacity .35s; }
+  .node .cross { stroke: var(--bad); stroke-width: 2.2; stroke-linecap: round; fill: none; opacity: 0; transition: opacity .35s; }
+  .node .halo { fill: var(--flow-soft); opacity: 0; transition: opacity .2s, fill .35s; }
+  .node .name { font-size: 15px; font-weight: 600; fill: var(--ink); text-anchor: middle; }
+  .node .val { font-size: 14px; fill: var(--muted); text-anchor: middle; transition: fill .35s; }
+  .node.dlq .name, .node.dlq .val { text-anchor: start; }
+
+  .node.warn .ring { stroke: var(--warn); stroke-width: 2; } .node.warn .core { fill: var(--warn); }
+  .node.warn .val { fill: var(--warn); font-weight: 600; }  .node.warn .halo { fill: var(--warn-soft); }
+  .node.bad .ring { stroke: var(--bad); stroke-width: 2; }   .node.bad .core { opacity: 0; }
+  .node.bad .cross { opacity: 1; }
+  .node.bad .val { fill: var(--bad); font-weight: 600; }     .node.bad .halo { fill: var(--bad-soft); }
+  .node.bad .outer, .node.off .outer { stroke: var(--off); }
+  .node.off .ring { stroke: var(--off); stroke-dasharray: 3 4; } .node.off .core { opacity: 0; }
+
+  .node:hover .ring, .node:focus-visible .ring, .node.active .ring { stroke-width: 2.6; }
+  .node:hover .halo, .node:focus-visible .halo, .node.active .halo { opacity: 1; }
+  .node:focus-visible .ring { stroke: var(--flow); }
+
+  /* Queue：堆在裡面的資料點。這是整張圖唯一「會長大」的東西 */
+  .pile circle { fill: var(--flow); opacity: 0; transform: scale(.2); transform-box: fill-box; transform-origin: center;
+                 transition: opacity .3s, transform .3s cubic-bezier(.2, .9, .3, 1.3), fill .35s; }
+  .pile circle.on { opacity: 1; transform: scale(1); }
+  .node.warn .pile circle { fill: var(--warn); } .node.bad .pile circle { fill: var(--bad); }
+  .node.mq.bad .cross { opacity: 0; }                /* 堵塞時用堆積表示，不打叉 */
+  .node.mq.bad.down .cross { opacity: 1; }           /* broker 沒回應才打叉 */
+  .node.mq.bad .ring { fill: var(--bad-soft); } .node.mq.warn .ring { fill: var(--warn-soft); }
+
+  /* 圖下方：三個讀數 + 節點細節 */
+  .below { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: clamp(24px, 4vw, 64px);
+           border-top: 1px solid var(--line); margin-top: 8px; padding-top: 24px; }
+  .figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin: 0; }
+  .figures dt { color: var(--muted); font-size: .95rem; }
+  .figures dd { margin: 2px 0 0; }
+  .figures .big { font-size: clamp(1.9rem, 3.2vw, 2.6rem); font-weight: 500; line-height: 1.1; }
+  .figures .unit { color: var(--muted); font-size: .95rem; margin-left: .3em; }
+  .figures .more { color: var(--muted); font-size: .9rem; margin-top: 4px; }
+  .figures .more b { color: var(--ink); font-weight: 600; }
+
+  .inspect { min-height: 172px; }
+  .inspect h2 { margin: 0; font-size: 1.15rem; font-weight: 600; display: flex; align-items: baseline; gap: .6em; flex-wrap: wrap; }
+  .inspect h2 small { font-size: .95rem; font-weight: 500; color: var(--muted); }
+  .inspect h2 small.warn { color: var(--warn); } .inspect h2 small.bad { color: var(--bad); }
+  .inspect .hint { color: var(--muted); margin: 0; }
+  .inspect dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 24px; margin: 12px 0 0; }
+  .inspect dl div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--faint); padding-bottom: 5px; }
+  .inspect dt { color: var(--muted); } .inspect dd { margin: 0; font-weight: 600; text-align: right; }
+  .spark { margin-top: 14px; display: flex; align-items: flex-end; gap: 14px; }
+  .spark svg { flex: 1; min-width: 0; height: 44px; overflow: visible; }
+  .spark path { fill: none; stroke: var(--flow); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .spark circle { fill: var(--flow); stroke: var(--paper); stroke-width: 2; }
+  .spark span { color: var(--muted); font-size: .88rem; white-space: nowrap; }
+  .pin { font: inherit; font-size: .88rem; color: var(--muted); background: none; border: 0; padding: 0; margin-left: auto;
+         cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+
+  footer { margin-top: 36px; color: var(--muted); font-size: .92rem; display: flex; gap: 10px 20px; flex-wrap: wrap; align-items: center; }
+  footer a { color: inherit; text-underline-offset: 3px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chips[hidden] { display: none; }
+  button.chip { font: inherit; font-size: .9rem; color: var(--ink); background: transparent; border: 1px solid var(--line);
+                border-radius: 999px; padding: 4px 13px; cursor: pointer; transition: background-color .15s, border-color .15s; }
+  button.chip:hover { border-color: var(--ink); }
+  button.chip[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  button.link { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer;
+                text-decoration: underline; text-underline-offset: 3px; }
+  :is(button, a):focus-visible { outline: 2px solid var(--flow); outline-offset: 3px; border-radius: 4px; }
+
+  /* 窄螢幕一律用 minmax(0, 1fr)：單寫 1fr 的最小寬度是內容寬，會把版面撐出水平捲動 */
+  @media (max-width: 860px) {
+    .below { grid-template-columns: minmax(0, 1fr); }
+    .status { min-height: 0; }
+  }
+  @media (max-width: 520px) {
+    .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .inspect dl { grid-template-columns: minmax(0, 1fr); }
+    .spark { flex-direction: column; align-items: stretch; gap: 6px; }
+    .spark svg { flex: none; width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <strong>Tester Receiver</strong>
+  <span id="stamp" role="status">連線中…</span>
+</header>
+
+<section class="status off" id="status" aria-live="polite">
+  <h1><span class="glyph" id="glyph" data-g="?" aria-hidden="true"></span><span id="title">讀取中</span></h1>
+  <p id="detail">正在取得系統目前的狀態。</p>
+</section>
+
+<section class="diagram" aria-label="資料流程圖">
+  <svg viewBox="0 74 1220 254" id="map">
+    <title>資料從設備經 API 進入 Queue，由 Receiver 取出後寫入資料庫；無法寫入的訊息進入 DLQ。</title>
+
+    <g id="edges">
+      <line class="edge" data-edge="devApi" x1="106" y1="150" x2="314" y2="150"/>
+      <line class="edge" data-edge="apiMq"  x1="346" y1="150" x2="520" y2="150"/>
+      <line class="edge" data-edge="mqRcv"  x1="760" y1="150" x2="934" y2="150"/>
+      <line class="edge" data-edge="rcvDb"  x1="966" y1="150" x2="1109" y2="150"/>
+      <line class="edge" data-edge="rcvDlq" x1="950" y1="166" x2="950" y2="268"/>
+      <text class="edge-note" data-note="devApi" x="210" y="130"></text>
+      <text class="edge-note" data-note="apiMq"  x="433" y="130"></text>
+      <text class="edge-note" data-note="mqRcv"  x="847" y="130"></text>
+      <text class="edge-note" data-note="rcvDb"  x="1037" y="130"></text>
+    </g>
+    <g id="particles" aria-hidden="true"></g>
+
+    <g class="node dev" data-node="dev" tabindex="0" role="button" transform="translate(90 150)">
+      <circle class="hit" r="38"/><circle class="halo" r="27"/>
+      <circle class="ring" r="16"/><circle class="core" r="5"/><path class="cross" d="M-5-5 5 5M5-5-5 5"/>
+      <text class="name" y="46">設備</text><text class="val num" y="66">–</text>
+    </g>
+    <g class="node api" data-node="api" tabindex="0" role="button" transform="translate(330 150)">
+      <circle class="hit" r="38"/><circle class="halo" r="27"/>
+      <circle class="ring" r="16"/><circle class="core" r="5"/><path class="cross" d="M-5-5 5 5M5-5-5 5"/>
+      <text class="name" y="46">API</text><text class="val num" y="66">–</text>
+    </g>
+    <g class="node mq" data-node="mq" tabindex="0" role="button" transform="translate(640 150)">
+      <rect class="hit" x="-130" y="-52" width="260" height="150"/>
+      <rect class="halo" x="-129" y="-51" width="258" height="102" rx="51"/>
+      <rect class="ring" x="-120" y="-42" width="240" height="84" rx="42"/>
+      <g class="pile" id="pile"></g>
+      <path class="cross" d="M-7-7 7 7M7-7-7 7"/>
+      <text class="name" y="70">Queue</text><text class="val num" y="90">–</text>
+    </g>
+    <g class="node rcv" data-node="rcv" tabindex="0" role="button" transform="translate(950 150)">
+      <circle class="hit" r="38"/><circle class="halo" r="27"/>
+      <circle class="ring" r="16"/><circle class="core" r="5"/><path class="cross" d="M-5-5 5 5M5-5-5 5"/>
+      <text class="name" y="-50">Receiver</text><text class="val num" y="-30">–</text>
+    </g>
+    <g class="node db" data-node="db" tabindex="0" role="button" transform="translate(1130 150)">
+      <circle class="hit" r="38"/><circle class="halo" r="30"/>
+      <circle class="outer" r="21"/><circle class="ring" r="16"/><circle class="core" r="5"/><path class="cross" d="M-5-5 5 5M5-5-5 5"/>
+      <text class="name" y="50">資料庫</text><text class="val num" y="70">–</text>
+    </g>
+    <g class="node dlq" data-node="dlq" tabindex="0" role="button" transform="translate(950 282)">
+      <rect class="hit" x="-30" y="-26" width="150" height="52"/><circle class="halo" r="23"/>
+      <circle class="ring" r="13"/><circle class="core" r="4"/><path class="cross" d="M-4-4 4 4M4-4-4 4"/>
+      <text class="name" x="26" y="-2">DLQ</text><text class="val num" x="26" y="17">–</text>
+    </g>
+  </svg>
+</section>
+
+<section class="below">
+  <dl class="figures">
+    <div>
+      <dt>在線設備</dt>
+      <dd><span class="big num" id="f-dev">–</span><span class="unit">/ <span class="num" id="f-dev-total">–</span> 台</span></dd>
+      <dd class="more">近 30 秒內有送資料</dd>
+    </div>
+    <div>
+      <dt>流量</dt>
+      <dd><span class="big num" id="f-in">–</span><span class="unit">筆/秒</span></dd>
+      <dd class="more">寫入資料庫 <b class="num" id="f-out">–</b> 筆/秒</dd>
+    </div>
+    <div>
+      <dt>錯誤，近 5 分鐘</dt>
+      <dd><span class="big num" id="f-err">–</span><span class="unit">筆</span></dd>
+      <dd class="more" id="f-err-more">沒有錯誤</dd>
+    </div>
+  </dl>
+  <aside class="inspect" id="inspect" aria-live="polite"></aside>
+</section>
+
+<footer>
+  <span>資料每 5 秒更新。更細的圖表在 <a href="http://localhost:3001" target="_blank" rel="noopener">Grafana</a>。</span>
+  <button class="link" id="preview-toggle" aria-expanded="false" aria-controls="chips">預覽其他狀態</button>
+  <div class="chips" id="chips" hidden></div>
+</footer>
+
+<script src="logic.js"></script>
+<script>
+'use strict';
+const M = window.Monitor;
+const $ = (id) => document.getElementById(id);
+const SVG = 'http://www.w3.org/2000/svg';
+const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+const NAMES = { dev: '設備', api: 'API', mq: 'Queue', rcv: 'Receiver', db: '資料庫', dlq: 'DLQ' };
+const STATE_WORD = { ok: '正常', warn: '注意', bad: '異常', off: '未知' };
+const GLYPH = { ok: '✓', warn: '!', bad: '✕', off: '?' };
+
+const view = { s: null, a: null, pinned: null, hovered: null, lastOk: null,
+               demo: new URLSearchParams(location.search).get('demo'), series: {} };
+
+// ---------- 資料來源 ----------
+async function prom(path, params) {
+  const res = await fetch('/prom/api/v1/' + path + '?' + new URLSearchParams(params));
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const body = await res.json();
+  if (body.status !== 'success') throw new Error(body.error || 'query failed');
+  return body.data.result;
+}
+const one = (r) => (r.length ? Number(r[0].value[1]) : null);
+const by = (r, label) => Object.fromEntries(r.map((x) => [x.metric[label], Number(x.value[1])]));
+
+const QUERIES = {
+  up: 'up{job=~"api|receiver|rabbitmq"}',
+  apiRate: 'sum by (outcome) (rate(tester_api_readings_total[20s]))',
+  rcvRate: 'sum by (outcome) (rate(tester_receiver_messages_total[20s]))',
+  retryRate: 'sum(rate(tester_receiver_retries_total[20s]))',
+  ready: 'rabbitmq_detailed_queue_messages_ready{queue=~"readings|readings.dlq"}',
+  unacked: 'rabbitmq_detailed_queue_messages_unacked{queue="readings"}',
+  growth: 'deriv(rabbitmq_detailed_queue_messages_ready{queue="readings"}[30s])',
+  devTotal: 'tester_api_devices_registered',
+  devActive: 'tester_api_devices_active',
+  broker: 'tester_api_broker_connected',
+  db: 'tester_receiver_database_up',
+  errApi: 'sum by (outcome) (increase(tester_api_readings_total{outcome=~"rejected|publish_failed"}[5m]))',
+  errDlq: 'sum(increase(tester_receiver_messages_total{outcome="dlq"}[5m]))',
+  errRetry: 'sum(increase(tester_receiver_retries_total[5m]))',
+  apiP95: 'histogram_quantile(0.95, sum by (le) (rate(tester_api_request_duration_seconds_bucket{outcome="accepted"}[1m])))',
+  rcvP95: 'histogram_quantile(0.95, sum by (le) (rate(tester_receiver_process_duration_seconds_bucket{outcome="written"}[1m])))',
+  sinceWrite: '(time() - tester_receiver_last_written_timestamp_seconds) and (tester_receiver_last_written_timestamp_seconds > 0)',
+};
+
+async function liveSnapshot() {
+  const keys = Object.keys(QUERIES);
+  const results = await Promise.all(keys.map((k) => prom('query', { query: QUERIES[k] })));
+  const r = Object.fromEntries(keys.map((k, i) => [k, results[i]]));
+  const up = by(r.up, 'job'), api = by(r.apiRate, 'outcome'), rcv = by(r.rcvRate, 'outcome');
+  const ready = by(r.ready, 'queue'), errApi = by(r.errApi, 'outcome');
+  const apiUp = up.api === 1, rcvUp = up.receiver === 1, mqUp = up.rabbitmq === 1;
+  const finite = (v) => (v != null && Number.isFinite(v) ? v : null);
+  const dbOk = rcvUp ? one(r.db) === 1 : null;
+  const writing = rcvUp && dbOk !== false;
+  // 服務停機後它的指標會停在最後一個值幾分鐘；停機時一律當成 0 或未知，不沿用舊值。
+  // 資料庫連不上時寫入速率也當成 0：rate() 是 20 秒的移動平均，剛斷線時還會殘留一個數字。
+  return {
+    apiUp, rcvUp, mqUp,
+    brokerOk: apiUp ? one(r.broker) === 1 : null,
+    dbOk,
+    inRate: apiUp ? api.accepted || 0 : 0, failRate: apiUp ? api.publish_failed || 0 : 0, rejRate: apiUp ? api.rejected || 0 : 0,
+    writeRate: writing ? rcv.written || 0 : 0, dupRate: writing ? rcv.duplicate || 0 : 0, dlqRate: rcvUp ? rcv.dlq || 0 : 0,
+    retryRate: rcvUp ? one(r.retryRate) || 0 : 0,
+    ready: mqUp ? ready.readings ?? null : null, dlq: mqUp ? ready['readings.dlq'] ?? null : null,
+    unacked: mqUp ? one(r.unacked) : null, growth: one(r.growth) || 0,
+    devTotal: one(r.devTotal), devActive: apiUp ? one(r.devActive) : null,
+    errRej: errApi.rejected || 0, errPub: errApi.publish_failed || 0, errDlq: one(r.errDlq) || 0, errRetry: one(r.errRetry) || 0,
+    apiP95: apiUp ? finite(one(r.apiP95)) : null, rcvP95: rcvUp ? finite(one(r.rcvP95)) : null,
+    sinceWrite: rcvUp ? finite(one(r.sinceWrite)) : null,
+  };
+}
+
+// 每個節點的近 5 分鐘走勢
+const SERIES = {
+  dev: { q: 'sum(rate(tester_api_readings_total{outcome="accepted"}[20s]))', label: '進入，筆/秒', of: (s) => s.inRate },
+  api: { q: 'sum(rate(tester_api_readings_total{outcome="accepted"}[20s]))', label: '進入，筆/秒', of: (s) => s.inRate },
+  mq:  { q: 'rabbitmq_detailed_queue_messages_ready{queue="readings"}', label: '等待中的筆數', of: (s) => s.ready },
+  rcv: { q: 'sum(rate(tester_receiver_messages_total{outcome="written"}[20s]))', label: '寫入，筆/秒', of: (s) => s.writeRate },
+  db:  { q: 'sum(rate(tester_receiver_messages_total{outcome="written"}[20s]))', label: '寫入，筆/秒', of: (s) => s.writeRate },
+  dlq: { q: 'rabbitmq_detailed_queue_messages_ready{queue="readings.dlq"}', label: 'DLQ 的筆數', of: (s) => s.dlq },
+};
+
+async function loadSeries(node) {
+  if (!node || !view.s) return;
+  if (view.demo) {
+    // 預覽：依目前的數值造一條合理的走勢（有成長的就畫成爬升）
+    const target = SERIES[node].of(view.s) || 0, climbing = node === 'mq' && view.s.growth > 0;
+    const isCount = node === 'mq' || node === 'dlq';   // 筆數是整數，不加抖動
+    view.series[node] = Array.from({ length: 60 }, (_, i) => {
+      const v = target * (climbing ? Math.pow(i / 59, 1.6) : 1);
+      return isCount ? Math.round(v) : v * (1 + Math.sin(i * 1.7) * 0.015);
+    });
+    return;
+  }
+  const end = Math.floor(Date.now() / 1000);
+  const r = await prom('query_range', { query: SERIES[node].q, start: end - 300, end, step: 5 });
+  view.series[node] = r.length ? r[0].values.map((p) => Number(p[1])) : [];
+}
+
+// ---------- 資料點：沿著線移動的小圓點 ----------
+const EDGES = {
+  devApi: [106, 150, 314, 150], apiMq: [346, 150, 520, 150], mqRcv: [760, 150, 934, 150],
+  rcvDb: [966, 150, 1109, 150], rcvDlq: [950, 166, 950, 268],
+};
+const lanes = Object.fromEntries(Object.entries(EDGES).map(([k, [x1, y1, x2, y2]]) =>
+  [k, { x1, y1, x2, y2, len: Math.hypot(x2 - x1, y2 - y1), perSec: 0, speed: 150, debt: 0, dots: [] }]));
+const pool = [];
+
+function spawn(lane) {
+  const el = pool.pop() || document.createElementNS(SVG, 'circle');
+  el.setAttribute('class', 'particle'); el.setAttribute('r', 3);
+  $('particles').appendChild(el);
+  lane.dots.push({ el, d: 0 });
+}
+
+let lastFrame = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastFrame) / 1000 || 0);   // 分頁切回來時不要一次跳一大步
+  lastFrame = now;
+  for (const lane of Object.values(lanes)) {
+    if (!reduced.matches) {
+      lane.debt += lane.perSec * dt;
+      while (lane.debt >= 1) { lane.debt -= 1; spawn(lane); }
+    }
+    for (let i = lane.dots.length - 1; i >= 0; i--) {
+      const p = lane.dots[i];
+      p.d += lane.speed * dt;
+      if (p.d >= lane.len) { p.el.remove(); pool.push(p.el); lane.dots.splice(i, 1); continue; }
+      const k = p.d / lane.len;
+      p.el.setAttribute('cx', lane.x1 + (lane.x2 - lane.x1) * k);
+      p.el.setAttribute('cy', lane.y1 + (lane.y2 - lane.y1) * k);
+      p.el.setAttribute('opacity', Math.min(1, p.d / 14, (lane.len - p.d) / 14));   // 進出節點時淡入淡出
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+// ---------- 畫面 ----------
+function tween(el, to, digits = 0) {
+  const from = el._v;
+  el._v = to;
+  cancelAnimationFrame(el._raf);
+  if (to == null || from == null || from === to || reduced.matches) { el.textContent = M.num(to, digits); return; }
+  const t0 = performance.now();
+  const step = (t) => {
+    const k = Math.min(1, (t - t0) / 480), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = M.num(from + (to - from) * e, digits);
+    if (k < 1) el._raf = requestAnimationFrame(step);
+  };
+  el._raf = requestAnimationFrame(step);
+}
+
+// Queue 裡的 60 個位置：由出口那一側往回堆，中間兩排先滿
+(function buildPile() {
+  const rows = [-6.5, 6.5, -19.5, 19.5];
+  for (let c = 0; c < 15; c++) for (const y of rows) {
+    const dot = document.createElementNS(SVG, 'circle');
+    dot.setAttribute('cx', 86 - c * 12.3); dot.setAttribute('cy', y); dot.setAttribute('r', 4.1);
+    $('pile').appendChild(dot);
+  }
+})();
+
+function render() {
+  const { s, a } = view;
+  $('status').className = 'status ' + a.level;
+  $('glyph').dataset.g = GLYPH[a.level];
+  $('title').textContent = a.title;
+  $('detail').textContent = a.detail;
+
+  for (const [id, n] of Object.entries(a.nodes)) {
+    const g = document.querySelector(`[data-node="${id}"]`);
+    const down = id === 'mq' && s && !s.mqUp;
+    g.setAttribute('class', `node ${id} ${n.state}${down ? ' down' : ''}${activeNode() === id ? ' active' : ''}`);
+    g.querySelector('.val').textContent = n.value;
+    g.setAttribute('aria-label', `${NAMES[id]}：${n.value}，${STATE_WORD[n.state]}`);
+    g.setAttribute('aria-pressed', String(view.pinned === id));
+  }
+  for (const [id, e] of Object.entries(a.edges)) {
+    document.querySelector(`[data-edge="${id}"]`).setAttribute('class', 'edge ' + e.state);
+    const note = document.querySelector(`[data-note="${id}"]`);
+    if (note) { note.textContent = e.note; note.setAttribute('class', 'edge-note ' + e.state); }
+    lanes[id].perSec = e.particles;
+    lanes[id].speed = e.state === 'warn' ? 85 : 150;      // 消化不及的那一段流得比較慢
+  }
+  [...$('pile').children].forEach((dot, i) => {
+    dot.style.transitionDelay = (i * 7) + 'ms';            // 一顆一顆堆上去，而不是整塊出現
+    dot.classList.toggle('on', i < a.pile);
+  });
+
+  const known = s && a.level !== 'off';
+  tween($('f-dev'), known ? s.devActive : null);
+  tween($('f-dev-total'), known ? s.devTotal : null);
+  tween($('f-in'), known ? s.inRate : null, known && s.inRate < 10 ? 1 : 0);
+  tween($('f-out'), known ? s.writeRate : null, known && s.writeRate < 10 ? 1 : 0);
+  const errs = known ? [['拒絕', s.errRej], ['未確認', s.errPub], ['重試', s.errRetry], ['DLQ', s.errDlq]].map(([k, v]) => [k, Math.round(v)]) : [];
+  tween($('f-err'), known ? errs.reduce((t, e) => t + e[1], 0) : null);
+  const some = errs.filter((e) => e[1] > 0);
+  $('f-err-more').innerHTML = !known ? '–' : some.length ? some.map(([k, v]) => `${k} <b class="num">${M.num(v)}</b>`).join('　') : '沒有錯誤';
+
+  renderInspect();
+  revealFocus(a.focus);
+}
+
+// 窄螢幕上圖需要左右捲動。出問題的節點若在畫面外，就把圖捲過去——
+// 否則標題說「資料庫連不上」，圖上卻看不到資料庫。只在問題換了節點時捲一次，不跟使用者搶捲軸。
+let revealed = null;
+function revealFocus(id) {
+  if (id === revealed) return;
+  revealed = id;
+  const pane = document.querySelector('.diagram');
+  if (!id || pane.scrollWidth <= pane.clientWidth) return;
+  const node = document.querySelector(`[data-node="${id}"] .ring`).getBoundingClientRect(), box = pane.getBoundingClientRect();
+  const left = pane.scrollLeft + (node.left + node.width / 2) - (box.left + box.width / 2);
+  pane.scrollTo({ left, behavior: reduced.matches ? 'auto' : 'smooth' });
+}
+
+// 目前要顯示細節的節點：滑鼠指著的 > 點選固定的 > 出問題的那一個
+const activeNode = () => view.hovered || view.pinned || (view.a && view.a.focus) || null;
+
+const ms = (sec) => (sec == null ? '–' : sec < 1 ? Math.round(sec * 1000) + ' 毫秒' : M.num(sec, 1) + ' 秒');
+const ago = (sec) => (sec == null ? '–' : sec < 90 ? Math.round(sec) + ' 秒前' : Math.round(sec / 60) + ' 分鐘前');
+
+function rowsFor(id, s) {
+  const r = (v) => M.num(v, v < 10 ? 1 : 0) + ' 筆/秒';
+  switch (id) {
+    case 'dev': return [['在線', `${M.num(s.devActive)} / ${M.num(s.devTotal)} 台`], ['送出', r(s.inRate + s.failRate + s.rejRate)],
+                        ['被拒絕（5 分鐘）', M.num(Math.round(s.errRej)) + ' 筆'], ['需重送（5 分鐘）', M.num(Math.round(s.errPub)) + ' 筆']];
+    case 'api': return [['接受', r(s.inRate)], ['未獲確認', r(s.failRate)], ['回應時間 p95', ms(s.apiP95)],
+                        ['與 Queue 的連線', s.brokerOk == null ? '–' : s.brokerOk ? '正常' : '中斷']];
+    case 'mq':  return [['等待中', M.num(s.ready) + ' 筆'], ['處理中', M.num(s.unacked) + ' 筆'],
+                        ['變化', s.ready == null ? '–' : Math.abs(s.growth) < 1 ? '持平' : (s.growth > 0 ? '每秒增加 ' : '每秒減少 ') + M.num(Math.abs(s.growth)) + ' 筆'],
+                        ['消化速度', r(s.writeRate + s.dupRate + s.dlqRate)]];
+    case 'rcv': return [['寫入', r(s.writeRate)], ['重複（已略過）', r(s.dupRate)], ['重試', r(s.retryRate)], ['處理時間 p95', ms(s.rcvP95)]];
+    case 'db':  return [['狀態', s.dbOk == null ? '未知' : s.dbOk ? '可寫入' : '連不上'], ['寫入', r(s.writeRate)], ['上次寫入', ago(s.sinceWrite)]];
+    case 'dlq': return [['目前', M.num(s.dlq) + ' 筆'], ['新增（5 分鐘）', M.num(Math.round(s.errDlq)) + ' 筆']];
+  }
+  return [];
+}
+
+function sparkPath(values, w, h) {
+  const peak = Math.max(0, ...values), n = values.length;
+  const scale = Math.max(1, peak);   // 全為 0 時仍畫成一條貼底的線；但標示的最高值要是實際的 0
+  const pts = values.map((v, i) => [i / (n - 1) * w, h - 2 - (v / scale) * (h - 6)]);
+  return { d: pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(''), max: peak };
+}
+
+function renderInspect() {
+  const id = activeNode(), { s, a } = view;
+  if (!id || !s || a.level === 'off') {
+    setInspect(`<p class="hint">${a.level === 'off' ? '監控資料恢復後，這裡會顯示各節點的細節。' : '指向或點選圖上的節點，查看那一段的細節。'}</p>`);
+    return;
+  }
+  const n = a.nodes[id], series = view.series[id];
+  let html = `<h2>${NAMES[id]}<small class="${n.state}">${n.value}</small>` +
+             (view.pinned === id ? '<button class="pin" id="unpin">取消固定</button>' : '') + '</h2>';
+  html += '<dl>' + rowsFor(id, s).map(([k, v]) => `<div><dt>${k}</dt><dd class="num">${v}</dd></div>`).join('') + '</dl>';
+  if (series && series.length > 1) {
+    const { d, max } = sparkPath(series, 300, 44);
+    html += `<div class="spark"><svg viewBox="0 0 300 44" preserveAspectRatio="none" role="img" aria-label="${SERIES[id].label}，近 5 分鐘，最高 ${M.num(max)}">` +
+            `<path d="${d}" vector-effect="non-scaling-stroke"/></svg>` +
+            `<span>${SERIES[id].label}<br>近 5 分鐘，最高 <b class="num">${M.num(max, max < 10 && !Number.isInteger(max) ? 1 : 0)}</b></span></div>`;
+  }
+  setInspect(html);
+}
+
+// 內容沒變就不動 DOM。否則每次重繪都會把「取消固定」按鈕換成新的，
+// 使用者按下與放開之間按鈕被換掉，點擊就遺失了（Playwright 驗證時抓到的）。
+let inspectHTML = '';
+function setInspect(html) {
+  if (html === inspectHTML) return;
+  inspectHTML = html;
+  $('inspect').innerHTML = html;
+}
+// 用 pointerdown 而不是 click：按下的當下就處理，不受之後的重繪影響；鍵盤操作仍走 click
+$('inspect').addEventListener('pointerdown', (e) => { if (e.target.closest('#unpin')) { e.preventDefault(); select(null); } });
+$('inspect').addEventListener('click', (e) => { if (e.target.closest('#unpin') && view.pinned) select(null); });
+
+async function focusChanged() {
+  document.querySelectorAll('.node').forEach((g) => g.classList.toggle('active', g.dataset.node === activeNode()));
+  renderInspect();
+  const id = activeNode();
+  if (id) { try { await loadSeries(id); } catch { /* 走勢取不到不影響其他部分 */ } if (activeNode() === id) renderInspect(); }
+}
+function select(id) { view.pinned = view.pinned === id ? null : id; if (view.a) { render(); focusChanged(); } }
+
+document.querySelectorAll('.node').forEach((g) => {
+  const id = g.dataset.node;
+  g.addEventListener('pointerenter', () => { view.hovered = id; focusChanged(); });
+  g.addEventListener('pointerleave', () => { view.hovered = null; focusChanged(); });
+  g.addEventListener('focus', () => { view.hovered = id; focusChanged(); });
+  g.addEventListener('blur', () => { view.hovered = null; focusChanged(); });
+  g.addEventListener('click', () => select(id));
+  g.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(id); }
+    if (e.key === 'Escape') { view.pinned = null; render(); }
+  });
+});
+
+// ---------- 預覽 ----------
+function buildChips() {
+  const chips = $('chips');
+  const items = [['', '即時資料']].concat(Object.entries(M.DEMOS).map(([k, d]) => [k, d.label]), [['offline', '監控中斷']]);
+  chips.replaceChildren(...items.map(([key, label]) => {
+    const b = Object.assign(document.createElement('button'), { className: 'chip', textContent: label });
+    b.setAttribute('aria-pressed', String((view.demo || '') === key));
+    b.onclick = () => setDemo(key || null);
+    return b;
+  }));
+}
+function setDemo(key) {
+  view.demo = key; view.series = {};
+  const url = new URL(location.href);
+  key ? url.searchParams.set('demo', key) : url.searchParams.delete('demo');
+  history.replaceState(null, '', url);
+  buildChips();
+  tick();
+}
+$('preview-toggle').onclick = () => {
+  const open = $('chips').hidden;
+  $('chips').hidden = !open;
+  $('preview-toggle').setAttribute('aria-expanded', String(open));
+};
+
+// ---------- 輪詢 ----------
+const clock = (d) => d.toLocaleTimeString('zh-TW', { hour12: false });
+
+async function tick() {
+  const stamp = $('stamp');
+  try {
+    if (view.demo === 'offline') throw new Error('preview: offline');
+    view.s = view.demo && M.DEMOS[view.demo] ? M.DEMOS[view.demo].s : await liveSnapshot();
+    view.a = M.assess(view.s);
+    if (view.demo) { stamp.className = 'preview'; stamp.textContent = `預覽：${M.DEMOS[view.demo].label}（不是即時資料）`; }
+    else { view.lastOk = new Date(); stamp.className = ''; stamp.textContent = '更新於 ' + clock(view.lastOk); }
+  } catch (err) {
+    view.a = M.offline(view.lastOk ? clock(view.lastOk) : '');
+    stamp.className = view.demo ? 'preview' : 'alert';
+    stamp.textContent = view.demo ? '預覽：監控中斷（不是即時資料）' : '無法取得資料';
+  }
+  render();
+  const id = activeNode();
+  if (id && view.a.level !== 'off') { try { await loadSeries(id); renderInspect(); } catch { /* 同上 */ } }
+}
+
+buildChips();
+if (view.demo) { $('chips').hidden = false; $('preview-toggle').setAttribute('aria-expanded', 'true'); }
+tick();
+setInterval(tick, 2500);
+requestAnimationFrame(frame);
+window.__monitor = { view, lanes, tick, setDemo };   // 給自動化驗證讀取目前狀態
+</script>
+</body>
+</html>

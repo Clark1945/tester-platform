@@ -84,6 +84,12 @@ func (c *APICounters) Observe(outcome APIOutcome, elapsed time.Duration) {
 	}
 }
 
+// RegisterGauge 註冊一個「抓取時才計算」的數值，例如連線狀態或在線設備數。
+// 零值的計數器沒有 registry，此時什麼都不做。
+func (c *APICounters) RegisterGauge(name, help string, value func() float64) {
+	registerGauge(c.registry, name, help, value)
+}
+
 // Snapshot 回傳目前的數值（JSON 輸出用）。
 func (c *APICounters) Snapshot() map[string]any {
 	return map[string]any{
@@ -179,6 +185,11 @@ func (c *ReceiverCounters) Settle(outcome ReceiverOutcome, elapsed time.Duration
 	}
 }
 
+// RegisterGauge 註冊一個「抓取時才計算」的數值，例如資料庫是否連得上。
+func (c *ReceiverCounters) RegisterGauge(name, help string, value func() float64) {
+	registerGauge(c.registry, name, help, value)
+}
+
 // MarkWritten 記錄一次成功寫入。
 func (c *ReceiverCounters) MarkWritten(now time.Time) {
 	c.Written.Add(1)
@@ -238,6 +249,21 @@ func newRegistry() *prometheus.Registry {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 	return reg
+}
+
+func registerGauge(reg *prometheus.Registry, name, help string, value func() float64) {
+	if reg == nil {
+		return
+	}
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: help}, value))
+}
+
+// Bool 把 true / false 轉成 Prometheus 慣用的 1 / 0。
+func Bool(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func counterFunc(name, help, outcome string, value *atomic.Int64) prometheus.CounterFunc {

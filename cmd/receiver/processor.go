@@ -153,6 +153,11 @@ func (p *processor) handle(ctx context.Context, d amqp.Delivery) {
 			p.deadLetter(ctx, j, reason, err, attempt+1)
 			return
 		case retry.Unavailable:
+			// 資料庫不可用期間的失敗不是這筆訊息的問題，所以把它的重試額度還給它。
+			// 不歸零的話，停機期間累積的逾時會把額度用完；資料庫一恢復，
+			// 只要再失敗一次（例如恢復前就發出、正好逾時的那次寫入），Ping 已經成功，
+			// 訊息就會被誤判為「資料庫活著但寫不進去」而進 DLQ。
+			attempt = 0
 			outage++
 			delay = p.backoff.Delay(outage)
 		default: // Transient

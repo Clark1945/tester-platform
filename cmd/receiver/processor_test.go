@@ -289,6 +289,65 @@ func TestHandle_CountersAccountForEveryMessage(t *testing.T) {
 	}
 }
 
+// pingSequence 讓 Ping 依序回傳指定的結果，用完之後一律成功
+type pingSequence struct {
+	*fakeStore
+	results []error
+}
+
+func (p *pingSequence) Ping(context.Context) error {
+	if len(p.results) == 0 {
+		return nil
+	}
+	err := p.results[0]
+	p.results = p.results[1:]
+	return err
+}
+
+func TestHandle_OutageDoesNotUseUpTheRetryBudget(t *testing.T) {
+	// 重現實際發生過的問題：資料庫停機約一分鐘，worker 手上的訊息累積了多次逾時。
+	// 資料庫恢復的那一刻，「恢復前就發出」的那次寫入仍然逾時，而 Ping 已經成功。
+	// 修正前：重試額度早已用完，這筆訊息被當成寫不進去而進了 DLQ（實測 4 個 worker 各掉 1 筆）。
+	h := newHarness()
+	timeout := context.DeadlineExceeded
+
+	// 停機期間 7 次逾時（超過 maxAttempts = 5），接著恢復後還有 1 次逾時，然後成功
+	for range 8 {
+		h.store.insertErrs = append(h.store.insertErrs, timeout)
+	}
+	// 第 5、6、7 次失敗時 Ping 仍失敗（資料庫還沒回來）；之後 Ping 成功
+	h.proc.store = &pingSequence{fakeStore: h.store, results: []error{
+		errors.New("no response"), errors.New("no response"), errors.New("no response"),
+	}}
+
+	h.handle(context.Background(), validMsg)
+
+	h.assertSettled(t, "ack")
+	if len(h.dlq.messages) != 0 {
+		t.Fatalf("message was dead-lettered right after the outage ended: %v", h.dlq.messages[0].Headers)
+	}
+	if len(h.store.rows) != 1 {
+		t.Errorf("rows = %d, want 1", len(h.store.rows))
+	}
+}
+
+func TestHandle_BudgetStillAppliesAfterAnOutage(t *testing.T) {
+	// 額度歸零不代表無限重試：資料庫恢復後若這筆訊息真的一直失敗，仍然要進 DLQ
+	h := newHarness()
+	h.store.insertErrs = []error{errDBShutdown, errDBShutdown, errDBShutdown}
+	for range 20 {
+		h.store.insertErrs = append(h.store.insertErrs, errDeadlock)
+	}
+
+	h.handle(context.Background(), validMsg)
+
+	h.assertSettled(t, "ack")
+	h.assertDeadLettered(t, reasonRetriesExhausted, validMsg)
+	if h.store.inserts != 3+5 {
+		t.Errorf("insert attempts = %d, want 3 during the outage + exactly 5 after it", h.store.inserts)
+	}
+}
+
 func TestHandle_PanicIsRecoveredAndDeadLettered(t *testing.T) {
 	h := newHarness()
 	h.store.panicWith = "boom"

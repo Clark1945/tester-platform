@@ -63,6 +63,14 @@ func run(logger *slog.Logger) error {
 	}()
 
 	counters := metrics.NewReceiverCounters()
+	// 抓取時才 Ping 一次（每 5 秒）。監控頁面用它判斷「資料庫這一段」是否通暢
+	counters.RegisterGauge("tester_receiver_database_up",
+		"1 if the receiver can reach the database, 0 otherwise.",
+		func() float64 {
+			pingCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			return metrics.Bool(st.Ping(pingCtx) == nil)
+		})
 	alerts := notify.New(cfg.WebhookURL, "receiver", cfg.WebhookMinInterval, logger)
 
 	proc := &processor{

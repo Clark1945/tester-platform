@@ -126,6 +126,19 @@ services:
     depends_on:
       - prometheus
 
+  # 即時流程監控頁面：http://localhost:8095
+  dashboard:
+    build:
+      context: .
+      args:
+        CMD: dashboard
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+    ports:
+      - "8095:8080"
+    depends_on:
+      - prometheus
+
   # ---- 測試工具：平常不啟動，用 `docker compose --profile tools run --rm <名稱>` 執行 ----
 
   simulator:

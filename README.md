@@ -104,11 +104,62 @@ RESULT: PASSED
 |---|---|---|
 | API | `localhost:8090` | `/v1/readings`、`/healthz`、`/metrics`、`/metrics.json` |
 | receiver | `localhost:8091` | `/healthz`、`/metrics`、`/metrics.json` |
+| **流程監控頁面** | http://localhost:8095 | 即時的資料流程圖，堵塞與停機會直接顯示在圖上 |
 | Grafana | http://localhost:3001 | 免登入可檢視；編輯用 `admin` / `tester` |
 | Prometheus | http://localhost:9090 | Alerts 頁面可看告警規則的狀態 |
 | RabbitMQ 管理介面 | http://localhost:15673 | `tester` / `tester` |
 | Postgres | `localhost:5440` | `tester` / `tester`，資料庫 `tester` |
 | RabbitMQ | `localhost:5673` | |
+
+### 流程監控頁面
+
+http://localhost:8095 。一頁看完系統現況，不需要懂 PromQL：
+
+- **在線設備**：近 30 秒內有資料被接受的設備數 / 已註冊的設備數。
+- **流量**：每秒進入的筆數，以及每秒寫入資料庫的筆數。兩者差距就是正在堆積的量。
+- **錯誤（近 5 分鐘）**：被拒絕（4xx）、未獲 broker 確認（503）、receiver 重試次數、進 DLQ 的筆數。
+- **系統狀態**：頁面最上方的標題就是現況，用一句白話寫出來（「資料正常流動」「Queue 堵塞」「資料庫連不上」），下方一行說明原因與影響。
+- **架構圖**：一條訊號路徑，設備 → API → Queue → Receiver → 資料庫，節點是線上的圓點。資料點沿線移動，密度隨流量變化。
+
+圖上會出現的變化：
+
+| 情況 | 畫面 |
+|---|---|
+| 進來的比消化的快 | **資料點在 Queue 裡堆起來**，Queue 轉為琥珀色（積壓）或紅色（堵塞）；出口那一段變慢並標示「消化不及」；上游照常流動 |
+| Receiver 停機 | Receiver 打叉，Queue 出口變成紅色虛線「沒人取走」，資料庫變成虛線圓圈（狀態未知） |
+| 資料庫連不上 | 資料庫打叉，最後一段變成紅色虛線「寫不進去」且沒有資料點；API 那一段仍正常流動 |
+| Broker 斷線 | API 到 Queue 變成紅色虛線「連線中斷」，設備到 API 標示「部分被退回」 |
+| 有訊息進 DLQ | DLQ 節點轉為琥珀色並顯示筆數 |
+| 監控資料中斷 | 所有節點變成虛線圓圈、沒有任何資料點；標題改為「無法取得監控資料」，不會停在舊數字上假裝正常 |
+
+「堵塞」的判定：Queue 等待中的訊息 ≥ 1,000 筆，或 ≥ 100 筆且仍在增加。≥ 100 筆為「積壓」。
+
+**互動**
+
+- 指向或點選節點，圖下方顯示那一段的細節與近 5 分鐘走勢。點選會固定，再點一次或按「取消固定」解除。
+- 系統異常時，會自動顯示出問題那個節點的細節；窄螢幕上還會把圖捲到那個節點。
+- 可用鍵盤操作：Tab 在節點間移動，Enter 固定，Esc 取消。
+- 支援深色模式；系統設定為「減少動態效果」時不顯示移動的資料點，狀態改由文字與線條樣式表達。
+
+**預覽各種狀態**
+
+不必真的弄壞系統就能看每一種畫面。頁尾的「預覽其他狀態」可以切換，也可以直接用網址：
+
+```
+http://localhost:8095/?demo=jam
+```
+
+可用的值：`normal`、`idle`、`backlog`、`jam`、`db`、`receiver`、`broker`、`dlq`、`offline`。預覽時右上角會標示「不是即時資料」。
+
+**實作與測試**
+
+頁面由 `cmd/dashboard` 提供：靜態檔案嵌在執行檔裡，資料經由它轉發到 Prometheus 的查詢 API（只開放查詢，不開放管理端點）。沒有前端框架，也沒有建置步驟。資料每 5 秒更新一次，也就是 Prometheus 的抓取間隔。
+
+「量測值 → 畫面該長什麼樣子」的判讀邏輯獨立放在 `cmd/dashboard/web/logic.js`，不碰 DOM，有單元測試：
+
+```bash
+node --test cmd/dashboard/webtest/logic.test.mjs
+```
 
 ### 監控（Prometheus + Grafana）
 
@@ -205,6 +256,7 @@ cmd/webhooksink/    開發用的 webhook 接收端（把告警印到 log）
 cmd/simulator/      模擬 N 台 device（重試、序號），輸出每台的最後序號
 cmd/verify/         對帳工具，失敗時 exit code 非 0
 cmd/chaos/          一鍵 chaos test：流量 + 故障注入 + 對帳
+cmd/dashboard/      流程監控頁面（靜態頁 + Prometheus 查詢代理）
 internal/simulator/ simulator 的邏輯（chaos 也會用到）
 internal/verify/    對帳的邏輯（chaos 也會用到）
 internal/metrics/   計數器、延遲分布，以 Prometheus 與 JSON 兩種格式輸出
@@ -329,6 +381,8 @@ API 用記憶體中的 device 名單做檢查（每 30 秒從資料庫刷新，�
 第三類是規格沒有的。規格的預設值是 100ms 起跳、最多 5 次，總共只等約 3 秒；資料庫重啟通常要 10 秒以上，照規格會把所有處理中的訊息都送進 DLQ。但資料庫連不上時問題不在訊息——換哪一筆來都會失敗——所以不該算在單筆訊息的重試次數上。
 
 **逾時的歧義**：資料庫沒回應時，錯誤往往只是「context deadline exceeded」，分不出是這筆查詢太慢還是資料庫掛了。做法是先當成暫時性；重試用完、準備進 DLQ 之前先 `Ping` 一次，Ping 也失敗就改判為資料庫不可用，繼續重試。換句話說，進 DLQ 的條件是「資料庫活著，但這筆訊息就是寫不進去」。
+
+**停機期間的失敗不佔用重試額度**：只要判定為資料庫不可用，這筆訊息的重試次數就歸零。這是後來才補上的。原本沒有歸零，停機期間累積的逾時會把額度用完；資料庫一恢復，「恢復前就發出、正好逾時」的那次寫入失敗時 Ping 已經成功，訊息就被誤判為寫不進去而進了 DLQ。實際發生過：資料庫停機約 60 秒，4 個 worker 手上的訊息各有 1 筆進了 DLQ。先前的 chaos test 只停 10 秒，逾時次數還沒到上限，所以沒有發現；修正後以停機 45 秒重跑，20,000 筆全數寫入、DLQ 為 0。
 
 ### 為什麼需要 jitter
 

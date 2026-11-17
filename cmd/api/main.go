@@ -21,7 +21,11 @@ import (
 	"tester-receiver/internal/store"
 )
 
-const shutdownTimeout = 10 * time.Second
+const (
+	shutdownTimeout = 10 * time.Second
+	// device 每秒送一筆；30 秒沒有任何一筆被接受就視為離線
+	activeDeviceWindow = 30 * time.Second
+)
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "api")
@@ -70,11 +74,25 @@ func run(logger *slog.Logger) error {
 	go func() { defer background.Done(); pub.Run(bgCtx) }()
 	go func() { defer background.Done(); cache.Run(bgCtx, cfg.DeviceRefreshInterval) }()
 
+	// 這幾個數值在 Prometheus 來抓取時才計算，給監控頁面顯示設備數與 broker 狀態
+	counters := metrics.NewAPICounters()
+	activity := &devices.Activity{}
+	counters.RegisterGauge("tester_api_devices_registered",
+		"Devices known to the API (size of the device cache).",
+		func() float64 { return float64(cache.Len()) })
+	counters.RegisterGauge("tester_api_devices_active",
+		"Devices that had a reading accepted in the last 30 seconds.",
+		func() float64 { return float64(activity.ActiveWithin(activeDeviceWindow, time.Now())) })
+	counters.RegisterGauge("tester_api_broker_connected",
+		"1 if the API currently has a broker connection, 0 otherwise.",
+		func() float64 { return metrics.Bool(pub.Connected()) })
+
 	h := &handler{
 		store:     st,
 		devices:   cache,
 		publisher: pub,
-		metrics:   metrics.NewAPICounters(),
+		metrics:   counters,
+		activity:  activity,
 		log:       logger,
 		timeout:   cfg.RequestTimeout,
 	}

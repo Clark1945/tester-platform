@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"tester-receiver/internal/devices"
 	"tester-receiver/internal/metrics"
 	"tester-receiver/internal/model"
 	"tester-receiver/internal/mq"
@@ -46,6 +47,7 @@ type handler struct {
 	devices   deviceChecker
 	publisher publisher
 	metrics   *metrics.APICounters
+	activity  *devices.Activity // 記錄哪些 device 最近有送資料；nil 時不記錄
 	log       *slog.Logger
 	timeout   time.Duration
 }
@@ -115,6 +117,7 @@ func (h *handler) postReading(w http.ResponseWriter, r *http.Request) {
 
 	// 只有 broker 確認後才計入 accepted：這個數字就是恆等式左邊的 published(confirmed)
 	h.metrics.Observe(metrics.APIAccepted, time.Since(start))
+	h.activity.Seen(reading.DeviceID, time.Now())
 	h.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
