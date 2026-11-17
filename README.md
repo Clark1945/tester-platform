@@ -6,12 +6,7 @@
 
 ## 架構
 
-```
-Device Simulator ──HTTP──> API ──publish（等 confirm）──> RabbitMQ ──consume（手動 ack）──> Receiver ──> PostgreSQL / TimescaleDB
-                            │                               │                                 │
-                     device 記憶體快取                  readings.dlq <── 永久錯誤 / 重試耗盡 ──┤
-                                                                                              └──> Webhook 告警（節流）
-```
+![Tester Receiver System 架構圖](docs/images/tester-architecture-v1.png)
 
 - **API**：驗證 payload、查 device 快取、發佈到 RabbitMQ，等 broker 確認後才回 202。不依賴資料庫。
 - **Receiver**：消費訊息、檢查 device、冪等寫入，成功後才 ack。失敗依種類重試或進 DLQ。內建 watchdog。
