@@ -37,7 +37,7 @@ func newFakeStore() *fakeStore {
 
 func (f *fakeStore) Ping(context.Context) error { return f.pingErr }
 
-// 和真的 store 一樣：device 不存在時由「寫入」回報 ErrUnknownDevice（foreign key），沒有另外的查詢
+// 模擬 store 的完整查詢與寫入操作；設備不存在時回報 ErrUnknownDevice。
 func (f *fakeStore) InsertReading(_ context.Context, r model.Reading) (bool, error) {
 	f.inserts++
 	if f.panicWith != nil {

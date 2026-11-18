@@ -12,13 +12,13 @@
     const elements = rows.slice(offset,offset+size).map(row => {
       const tr = document.createElement('tr');
       const t = new Date(row.record_time);
-      const values = [row.device_id, row.seq, Number.isNaN(t.getTime()) ? row.record_time : date.format(t), row.freq, row.uni_id];
+      const values = [row.device_id, row.device_name || '—', row.seq, Number.isNaN(t.getTime()) ? row.record_time : date.format(t), row.freq, row.uni_id];
       for (const value of values) { const td = document.createElement('td'); td.textContent = String(value); tr.append(td); }
-      tr.children[2].title = row.record_time;
+      tr.children[3].title = row.record_time;
       return tr;
     });
     if (!elements.length) {
-      const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan=5;
+      const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan=6;
       td.textContent = busy ? '載入中…' : failed ? '無法讀取資料，請重新整理。' : '尚無已寫入的資料。'; tr.append(td); elements.push(tr);
     }
     body.replaceChildren(...elements);

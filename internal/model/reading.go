@@ -19,8 +19,11 @@ const maxDeviceIDLen = 64
 
 // Reading 是一筆 device 上傳的量測資料。
 type Reading struct {
-	UniID      uuid.UUID `json:"uni_id"`
-	DeviceID   string    `json:"device_id"`
+	UniID    uuid.UUID `json:"uni_id"`
+	DeviceID string    `json:"device_id"`
+	// DeviceName 由 Receiver 查詢 devices 後保存；不信任上傳端提供的名稱。
+	// 舊資料尚無名稱快照時為 nil。
+	DeviceName *string   `json:"device_name,omitempty"`
 	Seq        int64     `json:"seq"`
 	RecordTime time.Time `json:"record_time"`
 	Freq       int32     `json:"freq"`

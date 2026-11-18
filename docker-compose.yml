@@ -13,6 +13,7 @@ services:
       # 逐檔掛載：整個目錄掛上去會蓋掉映像檔內建的 timescaledb 初始化腳本
       - ./migrations/001_schema.sql:/docker-entrypoint-initdb.d/100_schema.sql:ro
       - ./migrations/002_seed.sql:/docker-entrypoint-initdb.d/101_seed.sql:ro
+      - ./migrations/003_device_names.sql:/docker-entrypoint-initdb.d/102_device_names.sql:ro
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tester -d tester"]

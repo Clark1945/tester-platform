@@ -278,6 +278,8 @@ scripts/go.ps1      go 指令包裝（本機或容器）
 
 ## 設計取捨
 
+Receiver 目前會先查設備名稱，再寫入量測資料；資料庫升級與名稱快照規則見 [設備名稱與雙重檢查](docs/DEVICE_NAMES.md)。
+
 常見問題與對應的章節：
 
 | 問題 | 章節 |
@@ -373,9 +375,9 @@ API 用記憶體中的 device 名單做檢查（每 30 秒從資料庫刷新，�
 - **剛註冊的 device 不在快取裡**：這時不直接回 404，而是向資料庫確認一次，存在就加進快取。原因是 404 對 device 的意思是「不要重試」；直接回 404 的話，剛註冊的 device 在快取刷新前送來的資料會被永久丟棄，而且沒有任何告警。
 - **確認不了（資料庫剛好故障）**：回 503 讓 device 重試，不回 404。「查不到」和「不存在」是兩回事。
 - **不存在的 ID 被拿來狂打**：確認過不存在的 ID 會記住 5 秒，期間不再查資料庫，避免每一筆都穿過快取打到資料庫。
-- **剛刪除的 device 還在快取裡**：API 會放行，但寫入時資料庫的 foreign key 會拒絕，訊息進 DLQ（原因 `unknown_device`）。
+- **剛刪除的 device 還在快取裡**：API 會放行，但 Receiver 查詢 devices 時會發現不存在，foreign key 也保留為第二道防線，訊息進 DLQ（原因 `unknown_device`）。
 
-所以權威是 `readings.device_id` 的 foreign key，而不是另外一次查詢。receiver 原本在寫入前先 SELECT 一次 devices，已經拿掉：檢查與寫入變成同一個動作，不存在「查的時候還在、寫的時候被刪了」的空窗。
+Receiver 現在先查詢 `devices.name`，再將名稱快照寫入 `readings.device_name`；兩步位於同一個 transaction，查詢使用 `FOR SHARE` 鎖住設備列，避免查完至寫入之間設備被改名或刪除。`readings.device_id` 的 foreign key 仍保留，作為第二道檢查。名稱不採用 device 上傳的值；空名稱以 device ID 代替。設備之後改名不會改寫舊 reading，重送也不會因名稱改變而被視為鍵衝突。
 
 ### 鍵相同但內容不同
 
@@ -477,7 +479,7 @@ published(confirmed) = written + duplicate + dlq + queue(ready + unacked)
 
 實測 4 個 worker 每秒約寫入 1,900 筆（同一台機器不同時間量到過 700，波動很大）。每筆訊息各自 commit。
 
-原本每筆訊息還要先 SELECT 一次 devices，後來拿掉了。但前後各量數次，都是約 1,900 筆/秒，**沒有可量測的差別**：瓶頸不在那次查詢。推測是每筆各自 commit 的成本（每次 commit 都要等 WAL 寫入磁碟），這一點沒有另外做實驗確認。所以下一步是批次：
+歷史版本曾移除每筆訊息的 devices 查詢；目前為了保存設備名稱快照，已恢復先查詢後寫入，以下量測僅供歷史參考，不能當作目前版本吞吐量。但前後各量數次，都是約 1,900 筆/秒，**沒有可量測的差別**：瓶頸不在那次查詢。推測是每筆各自 commit 的成本（每次 commit 都要等 WAL 寫入磁碟），這一點沒有另外做實驗確認。所以下一步是批次：
 
 - 批次寫入：一次取一批訊息，用多列 `INSERT ... ON CONFLICT DO NOTHING` 一次寫入、一次 commit，再用 `Ack(multiple=true)` 整批 ack。量更大時改成 `COPY` 到暫存表，再 `INSERT ... SELECT ... ON CONFLICT`（`COPY` 本身不支援 `ON CONFLICT`）。
 - 批次的代價是失敗處理變複雜：一批裡有一筆壞掉會讓整批失敗，要能退回逐筆處理，把壞的那筆挑出來送 DLQ。
@@ -578,7 +580,7 @@ Device 產生每筆資料時，先寫進本機的 `unsend_log` 檔案，再嘗�
 |---|---|---|---|
 | 重試耗盡 | 一律 5 次後進 DLQ | 資料庫不可用時持續重試；單筆暫時性錯誤才受次數限制 | 預設重試總長約 3 秒，但 chaos test 會停資料庫 10 秒，照規格必定進 DLQ |
 | 優雅關閉 | 等處理中的訊息完成 | 同規格；已預取但尚未開始的訊息直接還給 queue | 資料庫故障時把 50 筆預取都做完會拖過容器的停止寬限 |
-| Receiver 的處理順序 | 解析 → 檢查 device 存在 → 寫 DB | 解析 → 寫 DB，device 由 foreign key 檢查 | 檢查與寫入合成一個動作，沒有兩者之間的空窗，也少一次往返 |
+| Receiver 的處理順序 | 解析 → 檢查 device 存在 → 寫 DB | 解析 → transaction 中 SELECT devices.name FOR SHARE → 寫入名稱快照 → commit → ack | 保留顯式查詢與 foreign key 雙重檢查，並保存接收時的設備名稱 |
 | 未知 device 的回應 | 404 | 資料庫確認不存在才回 404；無法確認時回 503 | 404 會讓 device 不再重試。快取沒命中不等於不存在 |
 | 重複的判定 | `ON CONFLICT` 未新增即為重複 | 另外比對內容，內容不同視為鍵衝突並進 DLQ | 否則鍵相同但內容不同的資料會被默默丟棄 |
 | 計數器恆等式 | chaos 後必須成立 | 穩態測試驗嚴格等式；chaos 以資料庫筆數為準 | 計數器在記憶體，receiver 重啟會歸零；重送會讓 `duplicate` 多算 |

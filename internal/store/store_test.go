@@ -92,6 +92,54 @@ func TestLatestReadings(t *testing.T) {
 	}
 }
 
+func TestDeviceNameSnapshotAndRename(t *testing.T) {
+	s, ctx := newTestStore(t)
+	deviceID := "name-test-" + uuid.NewString()
+	if _, err := s.pool.Exec(ctx, `INSERT INTO devices (device_id,name) VALUES ($1,$2)`, deviceID, "原始名稱"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, err := s.pool.Exec(context.Background(), `DELETE FROM devices WHERE device_id=$1`, deviceID)
+		if err != nil {
+			t.Error(err)
+		}
+	})
+	r := testReading(1)
+	r.DeviceID = deviceID
+	spoof := "偽造名稱"
+	r.DeviceName = &spoof
+	cleanup(t, s, r.UniID)
+	if inserted, err := s.InsertReading(ctx, r); err != nil || !inserted {
+		t.Fatalf("insert: %v %v", inserted, err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE devices SET name=$2 WHERE device_id=$1`, deviceID, "改名後"); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := s.InsertReading(ctx, r); err != nil || inserted {
+		t.Fatalf("resend after rename: %v %v", inserted, err)
+	}
+	second := r
+	second.UniID = uuid.New()
+	second.Seq = 2
+	second.RecordTime = second.RecordTime.Add(time.Second)
+	cleanup(t, s, second.UniID)
+	if _, err := s.InsertReading(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.QueryReadings(ctx, ReadingQuery{DeviceID: deviceID, Limit: 10})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("query: %+v %v", rows, err)
+	}
+	if rows[0].DeviceName == nil || *rows[0].DeviceName != "原始名稱" || rows[1].DeviceName == nil || *rows[1].DeviceName != "改名後" {
+		t.Fatalf("wrong snapshots: %+v", rows)
+	}
+	// Direct DB writes still cannot bypass the foreign key.
+	_, err = s.pool.Exec(ctx, `INSERT INTO readings (uni_id,device_id,seq,record_time,freq) VALUES ($1,'no-such-name-test-device',1,now(),1000)`, uuid.NewString())
+	if err == nil {
+		t.Fatal("foreign key no longer enforced")
+	}
+}
+
 func TestDeviceExists(t *testing.T) {
 	s, ctx := newTestStore(t)
 

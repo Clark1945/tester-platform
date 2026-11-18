@@ -182,8 +182,8 @@ func (p *processor) handle(ctx context.Context, d amqp.Delivery) {
 
 // write 嘗試寫入一次。
 //
-// device 是否存在由資料庫的 foreign key 把關（store 會回報 ErrUnknownDevice），這裡不另外查詢。
-// api 的快取只是前置過濾；這個 foreign key 才是權威，而且檢查與寫入是同一個動作。
+// store 在同一個 transaction 先查詢 device 名稱，再將名稱快照與 reading 寫入。
+// API 快取是前置檢查，Receiver 查詢與 foreign key 則是資料庫端的雙重檢查。
 func (p *processor) write(ctx context.Context, reading model.Reading) (inserted bool, err error) {
 	// 用不受關閉訊號影響的 context：服務關閉時，已開始的寫入要做完
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.timeout)
