@@ -40,7 +40,9 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	handler, err := routes(promURL)
+	load := newLoadController(envOr("API_URL", "http://api:8080"))
+	defer load.stop()
+	handler, err := routesWithLoad(promURL, load)
 	if err != nil {
 		return err
 	}
@@ -73,6 +75,10 @@ func run(logger *slog.Logger) error {
 }
 
 func routes(promURL *url.URL) (http.Handler, error) {
+	return routesWithLoad(promURL, newLoadController(envOr("API_URL", "http://api:8080")))
+}
+
+func routesWithLoad(promURL *url.URL, load *loadController) (http.Handler, error) {
 	static, err := fs.Sub(webFiles, "web")
 	if err != nil {
 		return nil, err
@@ -85,6 +91,25 @@ func routes(promURL *url.URL) (http.Handler, error) {
 	}
 
 	mux := http.NewServeMux()
+	load.register(mux)
+	apiURL, err := url.Parse(load.target)
+	if err != nil {
+		return nil, err
+	}
+	readingsProxy := httputil.NewSingleHostReverseProxy(apiURL)
+	director := readingsProxy.Director
+	readingsProxy.Director = func(r *http.Request) {
+		director(r)
+		r.URL.Path = "/v1/readings"
+		r.URL.RawPath = ""
+		r.Header.Del("Cookie")
+		r.Header.Del("Authorization")
+	}
+	readingsProxy.Transport = &http.Transport{ResponseHeaderTimeout: 6 * time.Second}
+	readingsProxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
+		loadError(w, http.StatusBadGateway, "readings API unreachable")
+	}
+	mux.Handle("GET /api/readings", readingsProxy)
 	// 只轉發唯讀的查詢端點
 	mux.Handle("GET /prom/api/v1/query", http.StripPrefix("/prom", proxy))
 	mux.Handle("GET /prom/api/v1/query_range", http.StripPrefix("/prom", proxy))

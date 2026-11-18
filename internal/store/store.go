@@ -130,21 +130,26 @@ func (s *Store) InsertReading(ctx context.Context, r model.Reading) (inserted bo
 
 // ReadingQuery 是查詢條件；零值欄位代表不過濾。
 type ReadingQuery struct {
-	DeviceID string
-	From     *time.Time // 含
-	To       *time.Time // 不含
-	Limit    int
+	DeviceID    string
+	From        *time.Time // 含
+	To          *time.Time // 不含
+	Limit       int
+	NewestFirst bool
 }
 
 // QueryReadings 依 record_time 排序回傳資料。
 func (s *Store) QueryReadings(ctx context.Context, q ReadingQuery) ([]model.Reading, error) {
+	order := "record_time, device_id, seq"
+	if q.NewestFirst {
+		order = "record_time DESC, uni_id DESC"
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT uni_id::text, device_id, seq, record_time, freq
 		 FROM readings
 		 WHERE ($1 = '' OR device_id = $1)
 		   AND ($2::timestamptz IS NULL OR record_time >= $2)
 		   AND ($3::timestamptz IS NULL OR record_time <  $3)
-		 ORDER BY record_time, device_id, seq
+		 ORDER BY `+order+`
 		 LIMIT $4`,
 		q.DeviceID, q.From, q.To, q.Limit,
 	)

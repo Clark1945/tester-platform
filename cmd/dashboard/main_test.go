@@ -75,3 +75,41 @@ func TestRoutes_PrometheusDown(t *testing.T) {
 		t.Errorf("status = %d, want 502 when prometheus is unreachable", rec.Code)
 	}
 }
+
+func TestReadingsProxy(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/readings" || r.URL.Query().Get("order") != "desc" || r.URL.Query().Get("limit") != "25" {
+			t.Errorf("wrong proxy destination: %s", r.URL)
+		}
+		if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
+			t.Error("browser credentials forwarded")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":0,"readings":[]}`))
+	}))
+	defer api.Close()
+	promURL, _ := url.Parse(api.URL)
+	h, err := routesWithLoad(promURL, newLoadController(api.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "/api/readings?order=desc&limit=25", nil)
+	r.Header.Set("Cookie", "session=secret")
+	r.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"readings":[]`) {
+		t.Fatalf("proxy: %d %s", w.Code, w.Body)
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("POST", "/api/readings", nil))
+	if w.Code != 405 {
+		t.Errorf("write proxy allowed: %d", w.Code)
+	}
+	api.Close()
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 502 {
+		t.Errorf("API down: %d", w.Code)
+	}
+}

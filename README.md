@@ -131,6 +131,8 @@ http://localhost:8095 。一頁看完系統現況，不需要懂 PromQL：
 
 **互動**
 
+頁面下方另有「最新資料」表格：可取得最新 100／500／1,000 筆，切換每頁 10／25／50／100 筆，並使用上一頁、下一頁或頁碼選單。依 `record_time` 由新到舊排序，同時間以 `uni_id` 排序；翻頁保留同一批資料，按「重新整理」才取得最新內容。資料時間以瀏覽器本機時區顯示，指向時間可查看原始 UTC 值。圖表的示範模式不會模擬表格，表格始終讀取實際資料庫。
+
 - 指向或點選節點，圖下方顯示那一段的細節與近 5 分鐘走勢。點選會固定，再點一次或按「取消固定」解除。
 - 系統異常時，會自動顯示出問題那個節點的細節；窄螢幕上還會把圖捲到那個節點。
 - 可用鍵盤操作：Tab 在節點間移動，Enter 固定，Esc 取消。
@@ -165,6 +167,12 @@ node --test cmd/dashboard/webtest/logic.test.mjs
 要看到有意義的圖，跑一次 chaos test 再回來看：receiver 停機時 queue 上升、資料庫停機時出現重試、broker 重啟時出現 `publish_failed`，恢復後 queue 回到 0。
 
 `/metrics` 是 Prometheus 格式；`/metrics.json` 是同一組數值的 JSON，給 verify 與 chaos 對帳用。
+
+### 網頁壓力測試
+
+開啟 http://localhost:8095/loadtest.html，設定總 RPS、設備數與持續秒數，即可開始或停止壓測、查看即時統計並下載 JSON 報告。更新後先執行 `docker compose up -d --build dashboard`。
+
+此工具使用真實 API、不自動重試；未達到目標流量時會顯示未送出的排程數。完整操作、流量語意與控制介面見 [網頁壓力測試](docs/LOAD_TEST.md)。
 
 ### Chaos test
 

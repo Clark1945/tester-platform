@@ -226,6 +226,8 @@ func TestGetReadings_QueryParsing(t *testing.T) {
 		{"limit zero", "/v1/readings?limit=0", http.StatusBadRequest, 0},
 		{"limit not a number", "/v1/readings?limit=abc", http.StatusBadRequest, 0},
 		{"bad from", "/v1/readings?from=yesterday", http.StatusBadRequest, 0},
+		{"invalid order", "/v1/readings?order=drop", http.StatusBadRequest, 0},
+		{"latest", "/v1/readings?order=desc&limit=25", http.StatusOK, 25},
 		{"valid range", "/v1/readings?from=2026-11-15T00:00:00Z&to=2026-11-16T00:00:00Z", http.StatusOK, 100},
 	}
 	for _, tc := range cases {
@@ -237,6 +239,9 @@ func TestGetReadings_QueryParsing(t *testing.T) {
 			}
 			if tc.wantCode == http.StatusOK && f.store.lastQuery.Limit != tc.wantLimit {
 				t.Errorf("limit = %d, want %d", f.store.lastQuery.Limit, tc.wantLimit)
+			}
+			if tc.wantCode == http.StatusOK && f.store.lastQuery.NewestFirst != strings.Contains(tc.target, "order=desc") {
+				t.Errorf("incorrect sort order: %+v", f.store.lastQuery)
 			}
 		})
 	}
@@ -265,9 +270,9 @@ func TestHealthz(t *testing.T) {
 func TestMetrics_CountEachOutcome(t *testing.T) {
 	f := newFixture()
 
-	f.do(t, http.MethodPost, "/v1/readings", validBody)                                               // accepted
-	f.do(t, http.MethodPost, "/v1/readings", validBody)                                               // accepted（重送也算）
-	f.do(t, http.MethodPost, "/v1/readings", `{`)                                                     // 400
+	f.do(t, http.MethodPost, "/v1/readings", validBody)                                                 // accepted
+	f.do(t, http.MethodPost, "/v1/readings", validBody)                                                 // accepted（重送也算）
+	f.do(t, http.MethodPost, "/v1/readings", `{`)                                                       // 400
 	f.do(t, http.MethodPost, "/v1/readings", strings.Replace(validBody, "device-001", "device-999", 1)) // 404
 	f.pub.failWith = errors.New("no confirm")
 	f.do(t, http.MethodPost, "/v1/readings", validBody) // 503

@@ -58,7 +58,7 @@ func (h *handler) routes() http.Handler {
 	mux.HandleFunc("POST /v1/readings", h.postReading)
 	mux.HandleFunc("GET /v1/readings", h.getReadings)
 	mux.HandleFunc("GET /healthz", h.healthz)
-	mux.Handle("GET /metrics", h.metrics.PrometheusHandler())           // 給 Prometheus 抓取
+	mux.Handle("GET /metrics", h.metrics.PrometheusHandler())            // 給 Prometheus 抓取
 	mux.Handle("GET /metrics.json", metrics.Handler(h.metrics.Snapshot)) // 給 verify / chaos 對帳
 	return mux
 }
@@ -173,6 +173,13 @@ func (h *handler) healthz(w http.ResponseWriter, r *http.Request) {
 func parseReadingQuery(r *http.Request) (store.ReadingQuery, error) {
 	params := r.URL.Query()
 	q := store.ReadingQuery{DeviceID: params.Get("device_id"), Limit: defaultLimit}
+	switch params.Get("order") {
+	case "", "asc":
+	case "desc":
+		q.NewestFirst = true
+	default:
+		return store.ReadingQuery{}, errors.New("order must be asc or desc")
+	}
 
 	var err error
 	if q.From, err = parseTimeParam(params.Get("from"), "from"); err != nil {

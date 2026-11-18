@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tester Receiver 流程監控</title>
+<link rel="stylesheet" href="/readings.css">
+<script src="/readings.js" defer></script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%230E7C66' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='4.5' fill='%230E7C66'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -154,6 +156,7 @@
 </style>
 </head>
 <body>
+<nav aria-label="工具" style="text-align:right;margin-bottom:16px"><a href="/loadtest.html" style="color:var(--flow)">開啟壓力測試 →</a></nav>
 
 <header class="top">
   <strong>Tester Receiver</strong>
@@ -237,6 +240,16 @@
     </div>
   </dl>
   <aside class="inspect" id="inspect" aria-live="polite"></aside>
+</section>
+
+<section class="readings-panel" aria-labelledby="readings-title">
+  <div class="readings-heading"><div><h2 id="readings-title">最新資料</h2><p>已寫入資料庫的量測值，依資料時間由新到舊排列。翻頁時保留同一批資料。</p></div>
+  <div class="readings-controls"><label>最新 <select id="readings-limit"><option value="100">100 筆</option><option value="500">500 筆</option><option value="1000">1,000 筆</option></select></label>
+  <label>每頁 <select id="readings-size"><option value="10">10 筆</option><option value="25" selected>25 筆</option><option value="50">50 筆</option><option value="100">100 筆</option></select></label>
+  <button id="readings-refresh" type="button">重新整理</button></div></div>
+  <p id="readings-status" role="status" aria-live="polite">正在讀取最新資料…</p>
+  <div class="readings-scroll" tabindex="0" role="region" aria-label="最新量測資料，可左右捲動"><table class="readings-table"><thead><tr><th scope="col">設備 ID</th><th scope="col">序號</th><th scope="col">資料時間（本機時區）</th><th scope="col">頻率 freq</th><th scope="col">唯一識別碼</th></tr></thead><tbody id="readings-body"><tr><td colspan="5">載入中…</td></tr></tbody></table></div>
+  <nav class="readings-pagination" aria-label="資料分頁"><span id="readings-range"></span><div><button id="readings-prev" type="button" disabled>上一頁</button><label>第 <select id="readings-page" aria-label="跳至頁碼" disabled><option>1</option></select> 頁</label><span id="readings-pages">／ 1 頁</span><button id="readings-next" type="button" disabled>下一頁</button></div></nav>
 </section>
 
 <footer>

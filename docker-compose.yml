@@ -134,6 +134,7 @@ services:
         CMD: dashboard
     environment:
       PROMETHEUS_URL: http://prometheus:9090
+      API_URL: http://api:8080
     ports:
       - "8095:8080"
     depends_on:

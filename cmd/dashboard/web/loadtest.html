@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>壓力測試 · Tester Receiver</title>
+<link rel="stylesheet" href="/loadtest.css">
+<script src="/loadtest.js" defer></script>
+</head>
+<body>
+<header><a href="/">← 流程監控</a><span>TESTER RECEIVER / LOAD TEST</span></header>
+<main>
+<section class="intro"><p class="eyebrow">流量控制台</p><h1>讓資料流動起來。</h1>
+<p>設定總流量、設備數與時間，從伺服器發送真實請求，觀察 API 和 Queue 的承載情況。</p></section>
+<div class="layout">
+<section class="panel"><h2>測試設定</h2>
+<form id="load-form">
+<label for="rps">目標總 RPS <span>所有設備合計，每秒請求數</span></label>
+<input id="rps" name="rps" type="number" min="1" max="10000" step="1" value="100" required>
+<label for="devices">設備數 <span>使用已註冊的 device-001 起，最多 100 台</span></label>
+<input id="devices" name="devices" type="number" min="1" max="100" step="1" value="100" required>
+<label for="duration">持續時間 <span>秒，最長 3,600 秒</span></label>
+<input id="duration" name="duration" type="number" min="1" max="3600" step="1" value="30" required>
+<p id="estimate" class="hint"></p>
+<div class="actions"><button id="start" type="submit" disabled>開始測試</button><button id="stop" type="button" class="secondary" disabled>停止</button></div>
+</form>
+<p class="hint">測試會新增真實資料；每次請求使用新的 UUID。這裡不自動重試，避免重試流量改變設定的 RPS。</p>
+</section>
+<section class="panel results" aria-label="測試結果">
+<div class="result-heading"><h2>執行狀態</h2><span id="state" role="status">連線中</span></div>
+<p id="run-info" class="hint">正在取得測試狀態…</p>
+<progress id="progress" max="100" value="0" aria-label="測試進度"></progress>
+<div class="metrics">
+<div><span>實際平均 RPS</span><strong id="actual">—</strong></div>
+<div><span>已送出 / 已完成</span><strong id="sent">—</strong></div>
+<div><span>API 接受 · 202</span><strong id="accepted">—</strong></div>
+<div><span>4xx / 5xx</span><strong id="http-errors">—</strong></div>
+<div><span>連線錯誤 / 取消</span><strong id="network">—</strong></div>
+<div><span>未送出的排程</span><strong id="skipped">—</strong></div>
+<div><span>平均延遲</span><strong id="avg">—</strong></div>
+<div><span>最大延遲</span><strong id="max">—</strong></div>
+</div>
+<p id="other" class="hint"></p>
+<p id="message" role="status" aria-live="polite"></p>
+<button id="download" class="secondary" type="button" disabled>下載 JSON 報告</button>
+</section></div>
+<aside><strong>如何判讀</strong><p>RPS 是目標發送速率，設備間採輪流分配，最多同時發送「設備數」筆請求。若回應太慢或發送端忙碌，排程會略過，不會事後爆量補送。實際平均 RPS 以整場經過時間計算，包含最後等待回應的時間。</p>
+<p>202 代表 RabbitMQ 已確認接收，並不代表已寫入資料庫。請搭配<a href="/" target="_blank" rel="noopener">流程監控</a>查看 Queue 是否排空。此報告是壓測統計，不能交給 simulator 的 verify 對帳。</p>
+<p>同一時間只允許一場測試。可關閉頁面後再回來查看；Dashboard 重啟會停止測試並清除結果。本工具沒有登入機制，請僅在可信任的測試網路使用。</p></aside>
+</main>
+</body></html>

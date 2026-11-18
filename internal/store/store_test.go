@@ -58,6 +58,40 @@ func cleanup(t *testing.T, s *Store, ids ...uuid.UUID) {
 	})
 }
 
+func TestLatestReadings(t *testing.T) {
+	s, ctx := newTestStore(t)
+	stamp := time.Date(2005, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		r := testReading(int64(100 + i))
+		r.RecordTime = stamp
+		if i == 3 {
+			r.RecordTime = stamp.Add(time.Second)
+		}
+		cleanup(t, s, r.UniID)
+		if _, err := s.InsertReading(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	to := stamp.Add(2 * time.Second)
+	rows, err := s.QueryReadings(ctx, ReadingQuery{From: &stamp, To: &to, Limit: 4, NewestFirst: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("rows=%d", len(rows))
+	}
+	for i := 1; i < len(rows); i++ {
+		prev, cur := rows[i-1], rows[i]
+		if prev.RecordTime.Before(cur.RecordTime) || (prev.RecordTime.Equal(cur.RecordTime) && prev.UniID.String() < cur.UniID.String()) {
+			t.Fatalf("not newest first: %+v", rows)
+		}
+	}
+	limited, err := s.QueryReadings(ctx, ReadingQuery{From: &stamp, To: &to, Limit: 2, NewestFirst: true})
+	if err != nil || len(limited) != 2 || limited[0].UniID != rows[0].UniID || limited[1].UniID != rows[1].UniID {
+		t.Fatalf("latest limit: %+v %v", limited, err)
+	}
+}
+
 func TestDeviceExists(t *testing.T) {
 	s, ctx := newTestStore(t)
 
